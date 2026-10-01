@@ -1,0 +1,17 @@
+.git
+.next
+.local
+deploy-data
+node_modules
+coverage
+*.log
+*.tsbuildinfo
+*.dump
+.env
+.env.*
+!.env.example
+!.env.production.example
+docker-compose*.yml
+README.md
+LOCAL_DATABASE.md
+DEPLOYMENT.md

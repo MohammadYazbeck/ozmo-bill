@@ -1,0 +1,87 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ozmo-bill-web
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+      APP_TIME_ZONE: "${APP_TIME_ZONE:-Asia/Damascus}"
+      APP_DOMAIN: "${APP_DOMAIN:?APP_DOMAIN is required}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
+      MIGRATION_DATABASE_URL: "${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:?ADMIN_USERNAME is required}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required}"
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is required}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER is required}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}"
+      RUN_DB_MIGRATIONS: "${RUN_DB_MIGRATIONS:-true}"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - web
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=web"
+      - "traefik.http.routers.ozmo-bill.rule=Host(`${APP_DOMAIN:?APP_DOMAIN is required}`)"
+      - "traefik.http.routers.ozmo-bill.entrypoints=websecure"
+      - "traefik.http.routers.ozmo-bill.tls=true"
+      - "traefik.http.routers.ozmo-bill.tls.certresolver=lets"
+      - "traefik.http.routers.ozmo-bill.middlewares=ozmo-bill-rate-limit"
+      - "traefik.http.routers.ozmo-bill-http.rule=Host(`${APP_DOMAIN:?APP_DOMAIN is required}`)"
+      - "traefik.http.routers.ozmo-bill-http.entrypoints=web"
+      - "traefik.http.routers.ozmo-bill-http.middlewares=ozmo-bill-https-redirect"
+      - "traefik.http.routers.ozmo-bill-http.service=noop@internal"
+      - "traefik.http.middlewares.ozmo-bill-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.ozmo-bill-https-redirect.redirectscheme.permanent=true"
+      - "traefik.http.middlewares.ozmo-bill-rate-limit.ratelimit.average=20"
+      - "traefik.http.middlewares.ozmo-bill-rate-limit.ratelimit.burst=50"
+      - "traefik.http.services.ozmo-bill.loadbalancer.server.port=3000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"fetch('http://127.0.0.1:3000/api/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  db:
+    image: postgres:17-alpine
+    container_name: ozmo-bill-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:?POSTGRES_DB is required}"
+      POSTGRES_USER: "${POSTGRES_USER:?POSTGRES_USER is required}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      APP_DB_USER: "${APP_DB_USER:?APP_DB_USER is required}"
+      APP_DB_PASSWORD: "${APP_DB_PASSWORD:?APP_DB_PASSWORD is required}"
+    volumes:
+      - ozmo-bill-db-data:/var/lib/postgresql/data
+      - ./docker/postgres/init-app-role.sh:/docker-entrypoint-initdb.d/10-app-role.sh:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+networks:
+  web:
+    external: true
+  internal:
+    internal: true
+
+volumes:
+  ozmo-bill-db-data:

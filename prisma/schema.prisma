@@ -1,0 +1,804 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CurrencyCode {
+  USD
+  SYP
+}
+
+enum ClientStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum SubscriptionStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  CANCELED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+enum InvoiceLineType {
+  SUBSCRIPTION
+  ADJUSTMENT
+}
+
+enum CashDirection {
+  INFLOW
+  OUTFLOW
+}
+
+enum CashEntryStatus {
+  POSTED
+  REVERSED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  OTHER
+}
+
+enum LiabilityPartyType {
+  PHOTOGRAPHER
+  MODEL
+  SUPPLIER
+  FREELANCER
+  OTHER
+}
+
+enum LiabilityStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum PayrollRunStatus {
+  DRAFT
+  APPROVED
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+enum PayrollItemStatus {
+  READY
+  PARTIALLY_PAID
+  PAID
+  VOID
+}
+
+enum AdvanceRecipientType {
+  EMPLOYEE
+  OWNER_PARTNER
+}
+
+enum AdvanceStatus {
+  OPEN
+  PARTIALLY_REPAID
+  SETTLED
+  VOID
+}
+
+enum BillingCycle {
+  MONTHLY
+  YEARLY
+  ONE_TIME
+}
+
+enum PayableStatus {
+  DUE
+  PARTIALLY_PAID
+  PAID
+  WAIVED
+}
+
+enum ServiceSubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELED
+}
+
+enum DocumentType {
+  INVOICE
+  RECEIPT
+}
+
+enum IdempotencyStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  ARCHIVE
+  POST
+  REVERSE
+  VOID
+  LOGIN
+}
+
+enum CashEntryKind {
+  SUBSCRIPTION_PAYMENT
+  CLIENT_EXTRA_INCOME
+  ADVERTISING_INCOME
+  EXTERNAL_INCOME
+  MANUAL_EXPENSE
+  LIABILITY_PAYMENT
+  RECURRING_EXPENSE_PAYMENT
+  SERVICE_PAYMENT
+  PAYROLL_PAYMENT
+  ADVANCE_DISBURSEMENT
+  ADVANCE_REPAYMENT
+  OPENING_BALANCE
+  REVERSAL
+}
+
+enum CashApplicationKind {
+  CUSTOMER_PAYMENT
+  LIABILITY_PAYMENT
+  PAYROLL_PAYMENT
+  ADVANCE_DISBURSEMENT
+  ADVANCE_REPAYMENT
+  RECURRING_EXPENSE_PAYMENT
+  SERVICE_PAYMENT
+}
+
+model Organization {
+  id                String       @id @default(uuid()) @db.Uuid
+  name              String       @db.VarChar(200)
+  timezone          String       @default("Asia/Damascus") @db.VarChar(100)
+  reportingCurrency CurrencyCode @default(USD)
+  archivedAt        DateTime?    @db.Timestamptz(3)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
+
+  appSettings               AppSetting[]
+  exchangeRates             ExchangeRate[]
+  clients                   Client[]
+  subscriptions             Subscription[]
+  invoices                  Invoice[]
+  cashEntries               CashEntry[]
+  expenseCategories         ExpenseCategory[]
+  customerPayments          CustomerPayment[]
+  liabilities               Liability[]
+  employees                 Employee[]
+  payrollRuns               PayrollRun[]
+  advances                  Advance[]
+  recurringExpenseTemplates RecurringExpenseTemplate[]
+  serviceSubscriptions      ServiceSubscription[]
+  documentSequences         DocumentSequence[]
+  idempotencyRecords        IdempotencyRecord[]
+  auditEvents               AuditEvent[]
+
+  @@index([archivedAt])
+}
+
+model AppSetting {
+  organizationId String       @db.Uuid
+  key            String       @db.VarChar(100)
+  value          Json
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@id([organizationId, key])
+}
+
+model ExchangeRate {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  baseCurrency   CurrencyCode @default(USD)
+  quoteCurrency  CurrencyCode @default(SYP)
+  rate           Decimal      @db.Decimal(20, 8)
+  effectiveAt    DateTime     @db.Date
+  source         String?      @db.VarChar(120)
+  note           String?      @db.Text
+  createdBy      String?      @db.VarChar(100)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, baseCurrency, quoteCurrency, effectiveAt])
+  @@index([organizationId, baseCurrency, quoteCurrency, effectiveAt])
+}
+
+model Client {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  name           String       @db.VarChar(200)
+  phone          String?      @db.VarChar(50)
+  email          String?      @db.VarChar(320)
+  note           String?      @db.Text
+  status         ClientStatus @default(ACTIVE)
+  archivedAt     DateTime?    @db.Timestamptz(3)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  subscriptions    Subscription[]
+  invoices         Invoice[]
+  cashEntries      CashEntry[]
+  customerPayments CustomerPayment[]
+  liabilities      Liability[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, name])
+  @@index([archivedAt])
+}
+
+model Subscription {
+  id              String             @id @default(uuid()) @db.Uuid
+  organizationId  String             @db.Uuid
+  clientId        String             @db.Uuid
+  name            String             @db.VarChar(200)
+  status          SubscriptionStatus @default(DRAFT)
+  startDate       DateTime           @db.Date
+  endDate         DateTime?          @db.Date
+  dueDay          Int                @default(1)
+  nextInvoiceDate DateTime?          @db.Date
+  archivedAt      DateTime?          @db.Timestamptz(3)
+  createdAt       DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime           @updatedAt @db.Timestamptz(3)
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  client          Client             @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  rates    SubscriptionRate[]
+  invoices Invoice[]
+
+  @@index([organizationId, status, nextInvoiceDate])
+  @@index([clientId, status])
+  @@index([archivedAt])
+}
+
+model SubscriptionRate {
+  id               String       @id @default(uuid()) @db.Uuid
+  subscriptionId   String       @db.Uuid
+  packageName      String       @db.VarChar(200)
+  monthlyAmountUsd Decimal      @db.Decimal(20, 4)
+  effectiveFrom    DateTime     @db.Date
+  effectiveTo      DateTime?    @db.Date
+  createdAt        DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(3)
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+
+  @@unique([subscriptionId, effectiveFrom])
+  @@index([subscriptionId, effectiveTo])
+}
+
+model Invoice {
+  id                        String        @id @default(uuid()) @db.Uuid
+  organizationId            String        @db.Uuid
+  clientId                  String        @db.Uuid
+  subscriptionId            String        @db.Uuid
+  number                    String        @db.VarChar(50)
+  periodStart               DateTime      @db.Date
+  periodEnd                 DateTime      @db.Date
+  issueDate                 DateTime      @db.Date
+  dueDate                   DateTime      @db.Date
+  status                    InvoiceStatus @default(DRAFT)
+  subtotalUsd               Decimal       @db.Decimal(20, 4)
+  totalUsd                  Decimal       @db.Decimal(20, 4)
+  openingBalanceSnapshotUsd Decimal       @default(0) @db.Decimal(20, 4)
+  issuedAt                  DateTime?     @db.Timestamptz(3)
+  voidedAt                  DateTime?     @db.Timestamptz(3)
+  createdAt                 DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt                 DateTime      @updatedAt @db.Timestamptz(3)
+  organization              Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  client                    Client        @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  subscription              Subscription  @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+
+  lines       InvoiceLine[]
+  allocations PaymentAllocation[]
+
+  @@unique([organizationId, number])
+  @@unique([subscriptionId, periodStart])
+  @@index([organizationId, status, dueDate])
+  @@index([clientId, issueDate])
+}
+
+model InvoiceLine {
+  id            String          @id @default(uuid()) @db.Uuid
+  invoiceId     String          @db.Uuid
+  position      Int
+  type          InvoiceLineType @default(SUBSCRIPTION)
+  description   String          @db.VarChar(300)
+  quantity      Decimal         @default(1) @db.Decimal(12, 4)
+  unitAmountUsd Decimal         @db.Decimal(20, 4)
+  lineTotalUsd  Decimal         @db.Decimal(20, 4)
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+  invoice       Invoice         @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([invoiceId, position])
+  @@index([invoiceId])
+}
+
+model ExpenseCategory {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  name           String       @db.VarChar(100)
+  slug           String       @db.VarChar(100)
+  isActive       Boolean      @default(true)
+  archivedAt     DateTime?    @db.Timestamptz(3)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  cashEntries               CashEntry[]
+  liabilities               Liability[]
+  recurringExpenseTemplates RecurringExpenseTemplate[]
+  serviceSubscriptions      ServiceSubscription[]
+  recurringExpenseOccurrences RecurringExpenseOccurrence[] @relation("RecurringOccurrenceCategory")
+  serviceCharges              ServiceCharge[]               @relation("ServiceChargeCategory")
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, isActive])
+}
+
+model CashEntry {
+  id                  String           @id @default(uuid()) @db.Uuid
+  organizationId      String           @db.Uuid
+  clientId            String?          @db.Uuid
+  expenseCategoryId   String?          @db.Uuid
+  direction           CashDirection
+  kind                CashEntryKind
+  status              CashEntryStatus  @default(POSTED)
+  occurredOn          DateTime         @db.Date
+  amountOriginal      Decimal          @db.Decimal(20, 4)
+  currency            CurrencyCode
+  currencyUnitsPerUsd Decimal          @db.Decimal(20, 8)
+  amountUsd           Decimal          @db.Decimal(20, 4)
+  paymentMethod       PaymentMethod    @default(CASH)
+  description         String           @db.VarChar(250)
+  note                String?          @db.Text
+  externalReference   String?          @db.VarChar(120)
+  reversalOfId        String?          @unique @db.Uuid
+  createdBy           String?          @db.VarChar(100)
+  createdAt           DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime         @updatedAt @db.Timestamptz(3)
+  organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  client              Client?          @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  expenseCategory     ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+  reversalOf          CashEntry?       @relation("CashEntryReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedBy          CashEntry?       @relation("CashEntryReversal")
+  application         CashEntryApplication?
+
+  customerPayment         CustomerPayment?
+  liabilityPayment        LiabilityPayment?
+  payrollPayment          PayrollPayment?
+  advanceDisbursement     Advance?                 @relation("AdvanceDisbursement")
+  advanceRepayment        AdvanceRepayment?        @relation("AdvanceRepaymentCash")
+  recurringExpensePayment RecurringExpensePayment?
+  servicePayment          ServicePayment?
+
+  @@index([organizationId, occurredOn])
+  @@index([organizationId, direction, occurredOn])
+  @@index([clientId, occurredOn])
+  @@index([expenseCategoryId, occurredOn])
+  @@index([status])
+}
+
+model CashEntryApplication {
+  cashEntryId     String              @id @db.Uuid
+  applicationKind CashApplicationKind
+  applicationId   String              @db.Uuid
+  createdAt       DateTime            @default(now()) @db.Timestamptz(3)
+  cashEntry       CashEntry           @relation(fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  @@unique([applicationKind, applicationId])
+}
+
+model CustomerPayment {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  clientId       String       @db.Uuid
+  cashEntryId    String       @unique @db.Uuid
+  receiptNumber  String       @db.VarChar(50)
+  receivedOn     DateTime     @db.Date
+  note           String?      @db.Text
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  client         Client       @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  cashEntry      CashEntry    @relation(fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  allocations PaymentAllocation[]
+
+  @@unique([organizationId, receiptNumber])
+  @@index([clientId, receivedOn])
+}
+
+model PaymentAllocation {
+  id        String          @id @default(uuid()) @db.Uuid
+  paymentId String          @db.Uuid
+  invoiceId String          @db.Uuid
+  amountUsd Decimal         @db.Decimal(20, 4)
+  createdAt DateTime        @default(now()) @db.Timestamptz(3)
+  payment   CustomerPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  invoice   Invoice         @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([paymentId, invoiceId])
+  @@index([invoiceId])
+}
+
+model Liability {
+  id                  String             @id @default(uuid()) @db.Uuid
+  organizationId      String             @db.Uuid
+  clientId            String?            @db.Uuid
+  expenseCategoryId   String?            @db.Uuid
+  payeeName           String             @db.VarChar(200)
+  partyType           LiabilityPartyType @default(OTHER)
+  incurredOn          DateTime           @db.Date
+  dueDate             DateTime           @db.Date
+  description         String             @db.VarChar(300)
+  amountOriginal      Decimal            @db.Decimal(20, 4)
+  currency            CurrencyCode
+  currencyUnitsPerUsd Decimal            @db.Decimal(20, 8)
+  amountUsd           Decimal            @db.Decimal(20, 4)
+  status              LiabilityStatus    @default(OPEN)
+  voidedAt            DateTime?          @db.Timestamptz(3)
+  createdAt           DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime           @updatedAt @db.Timestamptz(3)
+  organization        Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  client              Client?            @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  expenseCategory     ExpenseCategory?   @relation(fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+
+  payments LiabilityPayment[]
+
+  @@index([organizationId, status, dueDate])
+  @@index([clientId, status])
+  @@index([expenseCategoryId])
+}
+
+model LiabilityPayment {
+  id               String    @id @default(uuid()) @db.Uuid
+  liabilityId      String    @db.Uuid
+  cashEntryId      String    @unique @db.Uuid
+  appliedAmountUsd Decimal   @db.Decimal(20, 4)
+  paidOn           DateTime  @db.Date
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  liability        Liability @relation(fields: [liabilityId], references: [id], onDelete: Restrict)
+  cashEntry        CashEntry @relation(fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  @@index([liabilityId, paidOn])
+}
+
+model Employee {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @db.Uuid
+  name           String         @db.VarChar(200)
+  phone          String?        @db.VarChar(50)
+  title          String?        @db.VarChar(150)
+  status         EmployeeStatus @default(ACTIVE)
+  hireDate       DateTime?      @db.Date
+  endDate        DateTime?      @db.Date
+  archivedAt     DateTime?      @db.Timestamptz(3)
+  createdAt      DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime       @updatedAt @db.Timestamptz(3)
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  compensationHistory EmployeeCompensation[]
+  payrollItems        PayrollItem[]
+  advances            Advance[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, name])
+}
+
+model EmployeeCompensation {
+  id            String    @id @default(uuid()) @db.Uuid
+  employeeId    String    @db.Uuid
+  effectiveFrom DateTime  @db.Date
+  effectiveTo   DateTime? @db.Date
+  baseSalaryUsd Decimal   @db.Decimal(20, 4)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @db.Timestamptz(3)
+  employee      Employee  @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  @@unique([employeeId, effectiveFrom])
+  @@index([employeeId, effectiveTo])
+}
+
+model PayrollRun {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @db.Uuid
+  periodStart    DateTime         @db.Date
+  status         PayrollRunStatus @default(DRAFT)
+  generatedAt    DateTime         @default(now()) @db.Timestamptz(3)
+  approvedAt     DateTime?        @db.Timestamptz(3)
+  voidedAt       DateTime?        @db.Timestamptz(3)
+  createdAt      DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @db.Timestamptz(3)
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  items PayrollItem[]
+
+  @@unique([organizationId, periodStart])
+  @@index([organizationId, status, periodStart])
+}
+
+model PayrollItem {
+  id                  String            @id @default(uuid()) @db.Uuid
+  payrollRunId        String            @db.Uuid
+  employeeId          String            @db.Uuid
+  baseSalaryUsd       Decimal           @db.Decimal(20, 4)
+  bonusUsd            Decimal           @default(0) @db.Decimal(20, 4)
+  otherEarningsUsd    Decimal           @default(0) @db.Decimal(20, 4)
+  deductionUsd        Decimal           @default(0) @db.Decimal(20, 4)
+  advanceDeductionUsd Decimal           @default(0) @db.Decimal(20, 4)
+  grossEarningsUsd    Decimal           @db.Decimal(20, 4)
+  deductionTotalUsd   Decimal           @db.Decimal(20, 4)
+  netPayUsd           Decimal           @db.Decimal(20, 4)
+  status              PayrollItemStatus @default(READY)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
+  payrollRun          PayrollRun        @relation(fields: [payrollRunId], references: [id], onDelete: Restrict)
+  employee            Employee          @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+
+  payments          PayrollPayment[]
+  advanceRepayments AdvanceRepayment[]
+
+  @@unique([payrollRunId, employeeId])
+  @@index([employeeId, status])
+}
+
+model PayrollPayment {
+  id               String      @id @default(uuid()) @db.Uuid
+  payrollItemId    String      @db.Uuid
+  cashEntryId      String      @unique @db.Uuid
+  appliedAmountUsd Decimal     @db.Decimal(20, 4)
+  paidOn           DateTime    @db.Date
+  createdAt        DateTime    @default(now()) @db.Timestamptz(3)
+  payrollItem      PayrollItem @relation(fields: [payrollItemId], references: [id], onDelete: Restrict)
+  cashEntry        CashEntry   @relation(fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  @@index([payrollItemId, paidOn])
+}
+
+model Advance {
+  id                  String               @id @default(uuid()) @db.Uuid
+  organizationId      String               @db.Uuid
+  employeeId          String?              @db.Uuid
+  cashEntryId         String               @unique @db.Uuid
+  recipientType       AdvanceRecipientType
+  recipientName       String               @db.VarChar(200)
+  disbursedOn         DateTime             @db.Date
+  principalOriginal   Decimal              @db.Decimal(20, 4)
+  currency            CurrencyCode
+  currencyUnitsPerUsd Decimal              @db.Decimal(20, 8)
+  principalUsd        Decimal              @db.Decimal(20, 4)
+  status              AdvanceStatus        @default(OPEN)
+  note                String?              @db.Text
+  voidedAt            DateTime?            @db.Timestamptz(3)
+  createdAt           DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime             @updatedAt @db.Timestamptz(3)
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  employee            Employee?            @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  cashEntry           CashEntry            @relation("AdvanceDisbursement", fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  repayments AdvanceRepayment[]
+
+  @@index([organizationId, status, disbursedOn])
+  @@index([employeeId, status])
+}
+
+model AdvanceRepayment {
+  id            String       @id @default(uuid()) @db.Uuid
+  advanceId     String       @db.Uuid
+  cashEntryId   String?      @unique @db.Uuid
+  payrollItemId String?      @db.Uuid
+  amountUsd     Decimal      @db.Decimal(20, 4)
+  repaidOn      DateTime     @db.Date
+  reversedAt    DateTime?    @db.Timestamptz(3)
+  createdAt     DateTime     @default(now()) @db.Timestamptz(3)
+  advance       Advance      @relation(fields: [advanceId], references: [id], onDelete: Restrict)
+  cashEntry     CashEntry?   @relation("AdvanceRepaymentCash", fields: [cashEntryId], references: [id], onDelete: Restrict)
+  payrollItem   PayrollItem? @relation(fields: [payrollItemId], references: [id], onDelete: Restrict)
+
+  @@index([advanceId, payrollItemId])
+  @@index([advanceId, repaidOn])
+  @@index([payrollItemId])
+  @@index([payrollItemId, reversedAt])
+}
+
+model RecurringExpenseTemplate {
+  id                String          @id @default(uuid()) @db.Uuid
+  organizationId    String          @db.Uuid
+  expenseCategoryId String          @db.Uuid
+  name              String          @db.VarChar(200)
+  amountOriginal    Decimal         @db.Decimal(20, 4)
+  currency          CurrencyCode
+  dueDay            Int
+  startDate         DateTime        @db.Date
+  endDate           DateTime?       @db.Date
+  isActive          Boolean         @default(true)
+  archivedAt        DateTime?       @db.Timestamptz(3)
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  expenseCategory   ExpenseCategory @relation(fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+
+  occurrences RecurringExpenseOccurrence[]
+
+  @@index([organizationId, isActive])
+  @@index([expenseCategoryId])
+}
+
+model RecurringExpenseOccurrence {
+  id                  String                   @id @default(uuid()) @db.Uuid
+  templateId          String                   @db.Uuid
+  expenseCategoryId   String                   @db.Uuid
+  description         String                   @db.VarChar(200)
+  periodStart         DateTime                 @db.Date
+  dueDate             DateTime                 @db.Date
+  expectedOriginal    Decimal                  @db.Decimal(20, 4)
+  currency            CurrencyCode
+  currencyUnitsPerUsd Decimal                  @db.Decimal(20, 8)
+  expectedUsd         Decimal                  @db.Decimal(20, 4)
+  status              PayableStatus            @default(DUE)
+  createdAt           DateTime                 @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime                 @updatedAt @db.Timestamptz(3)
+  template            RecurringExpenseTemplate @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  expenseCategory     ExpenseCategory          @relation("RecurringOccurrenceCategory", fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+
+  payments RecurringExpensePayment[]
+
+  @@unique([templateId, periodStart])
+  @@index([status, dueDate])
+  @@index([expenseCategoryId])
+}
+
+model RecurringExpensePayment {
+  id               String                     @id @default(uuid()) @db.Uuid
+  occurrenceId     String                     @db.Uuid
+  cashEntryId      String                     @unique @db.Uuid
+  appliedAmountUsd Decimal                    @db.Decimal(20, 4)
+  paidOn           DateTime                   @db.Date
+  createdAt        DateTime                   @default(now()) @db.Timestamptz(3)
+  occurrence       RecurringExpenseOccurrence @relation(fields: [occurrenceId], references: [id], onDelete: Restrict)
+  cashEntry        CashEntry                  @relation(fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  @@index([occurrenceId, paidOn])
+}
+
+model ServiceSubscription {
+  id                String                    @id @default(uuid()) @db.Uuid
+  organizationId    String                    @db.Uuid
+  expenseCategoryId String                    @db.Uuid
+  name              String                    @db.VarChar(200)
+  provider          String?                   @db.VarChar(200)
+  amountOriginal    Decimal                   @db.Decimal(20, 4)
+  currency          CurrencyCode
+  billingCycle      BillingCycle
+  billingAnchorDay  Int                       @default(1)
+  nextRenewalDate   DateTime?                 @db.Date
+  status            ServiceSubscriptionStatus @default(ACTIVE)
+  startDate         DateTime                  @db.Date
+  endDate           DateTime?                 @db.Date
+  note              String?                   @db.Text
+  archivedAt        DateTime?                 @db.Timestamptz(3)
+  createdAt         DateTime                  @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime                  @updatedAt @db.Timestamptz(3)
+  organization      Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  expenseCategory   ExpenseCategory           @relation(fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+
+  charges ServiceCharge[]
+
+  @@index([organizationId, status, nextRenewalDate])
+  @@index([expenseCategoryId])
+}
+
+model ServiceCharge {
+  id                    String              @id @default(uuid()) @db.Uuid
+  serviceSubscriptionId String              @db.Uuid
+  expenseCategoryId     String              @db.Uuid
+  description           String              @db.VarChar(200)
+  periodStart           DateTime            @db.Date
+  periodEnd             DateTime?           @db.Date
+  dueDate               DateTime            @db.Date
+  expectedOriginal      Decimal             @db.Decimal(20, 4)
+  currency              CurrencyCode
+  currencyUnitsPerUsd   Decimal             @db.Decimal(20, 8)
+  expectedUsd           Decimal             @db.Decimal(20, 4)
+  status                PayableStatus       @default(DUE)
+  createdAt             DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime            @updatedAt @db.Timestamptz(3)
+  serviceSubscription   ServiceSubscription @relation(fields: [serviceSubscriptionId], references: [id], onDelete: Restrict)
+  expenseCategory       ExpenseCategory     @relation("ServiceChargeCategory", fields: [expenseCategoryId], references: [id], onDelete: Restrict)
+
+  payments ServicePayment[]
+
+  @@unique([serviceSubscriptionId, dueDate])
+  @@index([status, dueDate])
+  @@index([expenseCategoryId])
+}
+
+model ServicePayment {
+  id               String        @id @default(uuid()) @db.Uuid
+  serviceChargeId  String        @db.Uuid
+  cashEntryId      String        @unique @db.Uuid
+  appliedAmountUsd Decimal       @db.Decimal(20, 4)
+  paidOn           DateTime      @db.Date
+  createdAt        DateTime      @default(now()) @db.Timestamptz(3)
+  serviceCharge    ServiceCharge @relation(fields: [serviceChargeId], references: [id], onDelete: Restrict)
+  cashEntry        CashEntry     @relation(fields: [cashEntryId], references: [id], onDelete: Restrict)
+
+  @@index([serviceChargeId, paidOn])
+}
+
+model DocumentSequence {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  type           DocumentType
+  year           Int
+  nextValue      Int          @default(1)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, type, year])
+}
+
+model IdempotencyRecord {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @db.Uuid
+  scope          String            @db.VarChar(100)
+  key            String            @db.VarChar(200)
+  requestHash    String            @db.Char(64)
+  status         IdempotencyStatus @default(PROCESSING)
+  responseStatus Int?
+  responseBody   Json?
+  resourceType   String?           @db.VarChar(100)
+  resourceId     String?           @db.Uuid
+  errorMessage   String?           @db.Text
+  lockedAt       DateTime          @default(now()) @db.Timestamptz(3)
+  expiresAt      DateTime          @db.Timestamptz(3)
+  createdAt      DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(3)
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, scope, key])
+  @@index([organizationId, status, expiresAt])
+}
+
+model AuditEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  actor          String?      @db.VarChar(100)
+  action         AuditAction
+  entityType     String       @db.VarChar(100)
+  entityId       String       @db.VarChar(100)
+  requestId      String?      @db.Uuid
+  before         Json?
+  after          Json?
+  metadata       Json?
+  ipAddress      String?      @db.VarChar(45)
+  userAgent      String?      @db.Text
+  occurredAt     DateTime     @default(now()) @db.Timestamptz(3)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, entityType, entityId, occurredAt])
+  @@index([requestId])
+  @@index([organizationId, actor, occurredAt])
+}

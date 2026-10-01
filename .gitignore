@@ -1,0 +1,41 @@
+# Dependencies
+/node_modules/
+/.pnp
+.pnp.*
+
+# Testing
+/coverage/
+
+# Next.js
+/.next/
+/out/
+
+# Production output and local deployment data
+/build/
+/deploy-data/
+/.local/
+
+# Environment files (examples are committed)
+.env*
+!.env.example
+!.env.production.example
+
+# Logs and generated artifacts
+*.log
+*.tsbuildinfo
+*.dump
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Hosting providers
+.vercel/
+
+# Generated Prisma client, if a custom output is added later
+/app/generated/prisma/
