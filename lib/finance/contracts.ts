@@ -125,6 +125,8 @@ export type ClientDto = Omit<ClientRecord, 'monthly' | 'paid' | 'due'> & {
   currentInvoiceDueDate?: string
   currentInvoiceSubtotal?: MoneyString
   currentInvoiceTotal?: MoneyString
+  currentInvoicePaid?: MoneyString
+  currentInvoiceDue?: MoneyString
   currentInvoiceOpeningBalance?: MoneyString
   currentInvoiceLines?: InvoiceLineDto[]
 }

@@ -1,6 +1,6 @@
 'use client'
 
-type InvoiceClient = {
+export type InvoiceClient = {
   name: string
   monthly: number
   due: number
@@ -10,6 +10,8 @@ type InvoiceClient = {
   invoiceDueDate?: string
   invoiceSubtotal?: number
   invoiceTotal?: number
+  invoicePaid?: number
+  invoiceDue?: number
   invoiceOpeningBalance?: number
   invoiceLines?: Array<{
     description: string
@@ -18,6 +20,8 @@ type InvoiceClient = {
     total: number
   }>
 }
+
+export type InvoiceExportRow = [string, number | null, number | null, number | null]
 
 const orange = 'FF5A0A'
 const cream = 'FFF8E8'
@@ -36,6 +40,42 @@ function monthText(date: Date) {
 
 function safeFileName(value: string) {
   return value.replace(/[\\/:*?"<>|]/g, '-').trim()
+}
+
+export function buildInvoiceExportRows(client: InvoiceClient, invoiceDate: Date): InvoiceExportRow[] {
+  const descriptions: InvoiceExportRow[] = []
+  if (client.invoiceLines) {
+    descriptions.push(...client.invoiceLines.map(lineItem => ([
+      lineItem.description,
+      lineItem.quantity,
+      lineItem.unitAmount,
+      lineItem.total,
+    ] as InvoiceExportRow)))
+  } else {
+    const outstanding = client.due > 0 ? client.due : client.monthly
+    const previousBalance = Math.max(outstanding - client.monthly, 0)
+    const currentBalance = client.invoiceDue ?? client.invoiceTotal ?? Math.min(outstanding, client.monthly)
+    if (previousBalance > 0) {
+      descriptions.push([
+        `Previous subscription balance before ${monthText(invoiceDate)}`,
+        1,
+        previousBalance,
+        previousBalance,
+      ])
+    }
+    descriptions.push([
+      `${client.package || 'Social Media'} monthly subscription (${monthText(invoiceDate)})`,
+      1,
+      currentBalance,
+      currentBalance,
+    ])
+  }
+
+  const paid = Math.max(client.invoicePaid ?? 0, 0)
+  if (paid > 0 && client.invoiceLines) {
+    descriptions.push(['Payment received', 1, -paid, -paid])
+  }
+  return descriptions
 }
 
 export async function downloadInvoiceXlsx(client: InvoiceClient, clientIndex: number) {
@@ -121,33 +161,11 @@ export async function downloadInvoiceXlsx(client: InvoiceClient, clientIndex: nu
     cell.alignment = { horizontal: 'left', vertical: 'middle' }
   })
 
-  const descriptions: Array<[string, number | null, number | null, number | null]> = []
-  if (client.invoiceLines) {
-    descriptions.push(...client.invoiceLines.map(lineItem => ([
-      lineItem.description,
-      lineItem.quantity,
-      lineItem.unitAmount,
-      lineItem.total,
-    ] as [string, number, number, number])))
-  } else {
-    const outstanding = client.due > 0 ? client.due : client.monthly
-    const previousBalance = Math.max(outstanding - client.monthly, 0)
-    const currentBalance = client.invoiceTotal ?? Math.min(outstanding, client.monthly)
-    if (previousBalance > 0) {
-      descriptions.push([
-        `Previous subscription balance before ${monthText(invoiceDate)}`,
-        1,
-        previousBalance,
-        previousBalance,
-      ])
-    }
-    descriptions.push([
-      `${client.package || 'Social Media'} monthly subscription (${monthText(invoiceDate)})`,
-      1,
-      currentBalance,
-      currentBalance,
-    ])
-  }
+  const descriptions = buildInvoiceExportRows(client, invoiceDate)
+  const invoiceBalance = client.invoiceDue ?? Math.max(
+    descriptions.reduce((sum, row) => sum + (row[3] ?? 0), 0),
+    0,
+  )
   while (descriptions.length < 6) descriptions.push(['', null, null, null])
 
   descriptions.slice(0, 6).forEach(([description, quantity, unitPrice, lineTotal], index) => {
@@ -190,12 +208,12 @@ export async function downloadInvoiceXlsx(client: InvoiceClient, clientIndex: nu
   sheet.getCell('J30').font = { name: 'Arial', size: 11, bold: true, color: { argb: gray } }
   sheet.getCell('J30').alignment = { horizontal: 'left' }
   sheet.mergeCells('M30:N30')
-  sheet.getCell('M30').value = { formula: 'SUM(M22:M27)' }
+  sheet.getCell('M30').value = { formula: 'SUM(M22:M27)', result: invoiceBalance }
   sheet.getCell('M30').numFmt = '$#,##0.00'
   sheet.getCell('M30').font = { name: 'Arial', size: 11, bold: true, color: { argb: '000000' } }
   sheet.getCell('M30').alignment = { horizontal: 'right' }
   sheet.mergeCells('K32:N34')
-  sheet.getCell('K32').value = { formula: 'M30' }
+  sheet.getCell('K32').value = { formula: 'M30', result: invoiceBalance }
   sheet.getCell('K32').numFmt = '$#,##0.00'
   sheet.getCell('K32').font = { name: 'Arial', size: 24, bold: true, color: { argb: green } }
   sheet.getCell('K32').alignment = { horizontal: 'right', vertical: 'middle' }

@@ -2270,6 +2270,9 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
           invoice.subscriptionId === subscription.id && sameDate(invoice.periodStart, context.periodStart)
         ))
       : undefined
+    const currentInvoicePaid = currentInvoice
+      ? sumDecimal(currentInvoice.allocations.map(allocation => allocation.amountUsd))
+      : ZERO
 
     return {
       id: client.id,
@@ -2289,6 +2292,8 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
         currentInvoiceDueDate: dateText(currentInvoice.dueDate),
         currentInvoiceSubtotal: money(currentInvoice.subtotalUsd),
         currentInvoiceTotal: money(currentInvoice.totalUsd),
+        currentInvoicePaid: money(currentInvoicePaid),
+        currentInvoiceDue: money(Prisma.Decimal.max(currentInvoice.totalUsd.minus(currentInvoicePaid), ZERO)),
         currentInvoiceOpeningBalance: money(currentInvoice.openingBalanceSnapshotUsd),
         currentInvoiceLines: currentInvoice.lines.map(line => ({
           description: line.description,
