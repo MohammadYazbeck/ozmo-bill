@@ -133,14 +133,26 @@ export type ClientDto = Omit<ClientRecord, 'monthly' | 'paid' | 'due'> & {
 
 export type IncomeDto = Omit<IncomeRecord, 'amount' | 'usd'> & {
   cashEntryId: string
+  description?: string
   amount: MoneyString
   usd: MoneyString
+  editHistory?: CashEntryEditDto[]
 }
 
 export type ExpenseDto = Omit<ExpenseRecord, 'amount' | 'usd'> & {
   cashEntryId?: string
   amount: MoneyString
   usd: MoneyString
+  manual?: boolean
+  editHistory?: CashEntryEditDto[]
+}
+
+export type CashEntryEditDto = {
+  id: string
+  actor: string
+  occurredAt: string
+  reason: string
+  changes: { field: string; before: string; after: string }[]
 }
 
 export type LiabilityDto = Omit<LiabilityRecord, 'total' | 'paid'> & {
@@ -366,6 +378,17 @@ export const financeCommandSchema = z.discriminatedUnion('type', [
     note: noteSchema,
     clientId: entityIdSchema.optional(),
   })),
+  command('income.update', z.strictObject({
+    cashEntryId: entityIdSchema,
+    date: financeDateSchema,
+    source: shortTextSchema,
+    type: z.enum(['دفعة اشتراك', 'دخل عميل إضافي', 'دخل تشغيل إعلانات', 'دخل خارجي']),
+    amount: positiveMoneyInputSchema,
+    currency: currencySchema,
+    note: noteSchema,
+    clientId: entityIdSchema.nullable().optional(),
+    reason: reversalReasonSchema,
+  })),
   command('cashEntry.reverse', z.strictObject({
     cashEntryId: entityIdSchema,
     date: financeDateSchema,
@@ -379,6 +402,17 @@ export const financeCommandSchema = z.discriminatedUnion('type', [
     currency: currencySchema,
     note: noteSchema,
     clientId: entityIdSchema.optional(),
+  })),
+  command('expense.update', z.strictObject({
+    cashEntryId: entityIdSchema,
+    date: financeDateSchema,
+    name: shortTextSchema,
+    category: categoryTextSchema,
+    amount: positiveMoneyInputSchema,
+    currency: currencySchema,
+    note: noteSchema,
+    clientId: entityIdSchema.nullable().optional(),
+    reason: reversalReasonSchema,
   })),
   command('liability.create', z.strictObject({
     date: financeDateSchema,

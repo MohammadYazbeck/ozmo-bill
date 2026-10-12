@@ -1,11 +1,13 @@
 'use client'
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import Image from 'next/image'
 import { downloadInvoiceXlsx } from './invoice'
+import { CashEditHistory } from './components/cash-edit-history'
 import { decimalToUnits, unitsToDecimal } from '@/lib/finance/accounting'
 import type {
   CashLedgerEntryDto,
+  CashEntryEditDto,
   ClientDto,
   ClientRecord,
   Currency,
@@ -561,13 +563,23 @@ function originalMoney(amount: string | number, currency: Currency) {
   return currency === 'USD' ? money(amount) : `${new Intl.NumberFormat('en-US').format(decimal(amount))} ل.س`
 }
 
+function incomeFormType(type: string) {
+  if (type === 'دخل إضافي من عميل') return 'دخل عميل إضافي'
+  if (type === 'دخل إعلاني') return 'دخل تشغيل إعلانات'
+  return type
+}
+
 function LocalIncome() {
-  const { data } = useFinance()
+  const { data, mutating } = useFinance()
   const [search, setSearch] = useState('')
   const [type, setType] = useState('الكل')
   const query = search.trim().toLocaleLowerCase('ar')
-  const rows = data.incomes.filter(row => (type === 'الكل' || row.type === type) && `${row.date} ${row.source} ${row.client ?? ''} ${row.type} ${row.note}`.toLocaleLowerCase('ar').includes(query))
-  return <><PageHead eyebrow="حركة الصندوق الداخلة" title="الدخل" description="دفعة الاشتراك تُخصم تلقائيًا من الرصيد المتبقي للعميل." action="تسجيل دخل"/><section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات الدخل</h2><span>{rows.length} من {data.incomes.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالمصدر أو العميل أو البيان أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/><select value={type} onChange={event=>setType(event.target.value)}><option>الكل</option><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select>{(search || type !== 'الكل') && <button className="btn ghost" onClick={()=>{setSearch('');setType('الكل')}}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>المصدر</th><th>النوع</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={6} text={data.incomes.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات دخل بعد.'}/> : rows.map(row => <tr key={row.id}><td>{row.date}</td><td className="strong">{row.source}</td><td>{row.type}</td><td>{originalMoney(row.amount, row.currency)}</td><td className="positive strong">{money(row.usd)}</td><td>{row.note || '—'}</td></tr>)}</tbody></table></div></section></>
+  const rows = data.incomes.filter(row => (type === 'الكل' || incomeFormType(row.type) === type) && `${row.date} ${row.source} ${row.client ?? ''} ${row.type} ${row.note}`.toLocaleLowerCase('ar').includes(query))
+  return <><PageHead eyebrow="حركة الصندوق الداخلة" title="الدخل" description="دفعة الاشتراك تُخصم تلقائيًا من الرصيد المتبقي للعميل. التعديلات محفوظة تحت كل حركة." action="تسجيل دخل"/><section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات الدخل</h2><span>{rows.length} من {data.incomes.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالمصدر أو العميل أو البيان أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/><select value={type} onChange={event=>setType(event.target.value)}><option>الكل</option><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select>{(search || type !== 'الكل') && <button className="btn ghost" onClick={()=>{setSearch('');setType('الكل')}}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>المصدر</th><th>النوع</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={7} text={data.incomes.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات دخل بعد.'}/> : rows.map(row => <Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.source}</td><td>{row.type}</td><td>{originalMoney(row.amount, row.currency)}</td><td className="positive strong">{money(row.usd)}</td><td>{row.note || '—'}</td><td><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل دخل', row.source, row.id)}>تعديل</button></td></tr><CashHistoryRow history={row.editHistory} columns={7}/></Fragment>)}</tbody></table></div></section></>
+}
+
+function CashHistoryRow({ history = [], columns }: { history?: CashEntryEditDto[]; columns: number }) {
+  return history.length ? <tr className="cash-history-row"><td colSpan={columns}><CashEditHistory history={history}/></td></tr> : null
 }
 
 function expenseGroups(rows: ExpenseDto[]) {
@@ -598,14 +610,17 @@ function LocalExpenses() {
     if (!window.confirm(`أرشفة اشتراك الخدمة «${row.name}»؟ لن تُحذف أي حركة دفع سابقة.`)) return
     await runCommand({ type: 'service.archive', requestId: crypto.randomUUID(), payload: { serviceId: row.id } })
   }
-  const expenseTable = <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات المصروفات</h2><span>{filteredExpenses.length} من {data.expenses.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالبند أو العميل أو التصنيف أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/>{search && <button className="btn ghost" onClick={()=>setSearch('')}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>البند</th><th>التصنيف</th><th>العميل</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th></tr></thead><tbody>{filteredExpenses.length === 0 ? <EmptyTableRow columns={7} text={data.expenses.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات مصروفات بعد.'}/> : filteredExpenses.map(row=><tr key={row.id}><td>{row.date}</td><td className="strong">{row.name}</td><td>{row.category}</td><td>{row.client || 'عام'}</td><td>{originalMoney(row.amount,row.currency)}</td><td className="negative strong">-{money(row.usd)}</td><td>{row.note || '—'}</td></tr>)}</tbody></table></div></section>
+  const expenseEdit = (row: ExpenseDto) => row.cashEntryId
+    ? <button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل مصروف', row.name, row.id)}>تعديل</button>
+    : <small title="هذه تسوية سلفة غير نقدية؛ تصحيحها من تسوية الراتب في الصندوق.">تسوية راتب غير نقدية</small>
+  const expenseTable = <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات المصروفات</h2><span>{filteredExpenses.length} من {data.expenses.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالبند أو العميل أو التصنيف أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/>{search && <button className="btn ghost" onClick={()=>setSearch('')}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>البند</th><th>التصنيف</th><th>العميل</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th><th>إجراء</th></tr></thead><tbody>{filteredExpenses.length === 0 ? <EmptyTableRow columns={8} text={data.expenses.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات مصروفات بعد.'}/> : filteredExpenses.map(row=><Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.name}</td><td>{row.category}</td><td>{row.client || 'عام'}</td><td>{originalMoney(row.amount,row.currency)}</td><td className="negative strong">-{money(row.usd)}</td><td>{row.note || '—'}</td><td>{expenseEdit(row)}</td></tr><CashHistoryRow history={row.editHistory} columns={8}/></Fragment>)}</tbody></table></div></section>
   const linkedTotal = data.expenses.filter(row => row.clientId).reduce((sum, row) => sum + decimal(row.usd), 0)
   const generalTotal = data.expenses.filter(row => !row.clientId).reduce((sum, row) => sum + decimal(row.usd), 0)
   return <>
     <PageHead eyebrow="حركة الصندوق الخارجة" title="المصروفات" description="سجّل المصروف العام أو اربطه بعميل لمعرفة صافي العميل." action="تسجيل مصروف"/>
     <div className="tabs expense-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>الملخص والحركات</button><button className={tab === 'linked' ? 'active' : ''} onClick={() => setTab('linked')}>مرتبطة بعميل</button><button className={tab === 'fixed' ? 'active' : ''} onClick={() => setTab('fixed')}>المصاريف الثابتة</button><button className={tab === 'services' ? 'active' : ''} onClick={() => setTab('services')}>اشتراكات الخدمات</button></div>
     {tab === 'overview' && <><section className="kpi-grid three"><Kpi label="إجمالي المصروفات" value={money(total)} sub={`${data.expenses.length} حركة`} tone="red"/><Kpi label="مرتبطة بعملاء" value={money(linkedTotal)} sub={`${data.expenses.filter(row=>row.clientId).length} حركة`}/><Kpi label="مصروفات عامة" value={money(generalTotal)} sub="على الشركة"/></section>{expenseTable}<section className="panel"><PanelTitle title="التصنيف"/><LocalExpenseBars rows={data.expenses}/></section></>}
-    {tab === 'linked' && <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>مصروفات مرتبطة بالعملاء</h2><span>{linked.length} حركة</span></div><input className="search" placeholder="ابحث بالعميل أو البند…" value={search} onChange={event=>setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>العميل</th><th>التصنيف</th><th>البيان</th><th>المبلغ</th></tr></thead><tbody>{linked.length === 0 ? <EmptyTableRow columns={5}/> : linked.map(row => <tr key={row.id}><td>{row.date}</td><td className="strong">{row.client}</td><td>{row.category}</td><td>{row.name}</td><td className="negative strong">-{money(row.usd)}</td></tr>)}</tbody></table></div></section>}
+    {tab === 'linked' && <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>مصروفات مرتبطة بالعملاء</h2><span>{linked.length} حركة</span></div><input className="search" placeholder="ابحث بالعميل أو البند…" value={search} onChange={event=>setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>العميل</th><th>التصنيف</th><th>البيان</th><th>المبلغ</th><th>إجراء</th></tr></thead><tbody>{linked.length === 0 ? <EmptyTableRow columns={6}/> : linked.map(row => <Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.client}</td><td>{row.category}</td><td>{row.name}</td><td className="negative strong">-{money(row.usd)}</td><td>{expenseEdit(row)}</td></tr><CashHistoryRow history={row.editHistory} columns={6}/></Fragment>)}</tbody></table></div></section>}
     {tab === 'fixed' && <section className="panel table-panel"><div className="list-tools"><div><h2>المصاريف الثابتة</h2><span>إضافة وتعديل ودف المصروف عند تسديده</span></div><button className="btn primary" onClick={() => openAction('مصروف ثابت جديد')}>+ إضافة</button></div><div className="table-scroll"><table><thead><tr><th>البند</th><th>التصنيف</th><th>المبلغ</th><th>يوم الاستحقاق</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.fixedExpenses.length === 0 ? <EmptyTableRow columns={6}/> : data.fixedExpenses.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{row.category}</td><td>{money(row.amount)}</td><td>{row.dueDay}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><button className="table-action primary-action" disabled={mutating || row.status === 'مدفوع'} onClick={()=>openAction('دفع مصروف ثابت', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</button><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل مصروف ثابت', row.name, row.id)}>تعديل</button><button className="table-action danger-action" disabled={mutating} onClick={()=>void archiveFixed(row).catch(() => undefined)}>أرشفة</button></div></td></tr>)}</tbody></table></div></section>}
     {tab === 'services' && <section className="panel table-panel"><div className="list-tools"><div><h2>اشتراكات خدمات الشركة</h2><span>إضافة وتعديل ودفع وأرشفة</span></div><button className="btn primary" onClick={() => openAction('اشتراك خدمة جديد')}>+ إضافة</button></div><div className="table-scroll"><table><thead><tr><th>الخدمة</th><th>التصنيف</th><th>القيمة</th><th>الدورة</th><th>التجديد</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.services.length === 0 ? <EmptyTableRow columns={7}/> : data.services.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{row.category}</td><td>{money(row.amount)}</td><td>{row.cycle}</td><td>{row.next}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><button className="table-action primary-action" disabled={mutating || row.status === 'مدفوع'} onClick={()=>openAction('دفع اشتراك خدمة', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</button><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل اشتراك خدمة', row.name, row.id)}>تعديل</button><button className="table-action danger-action" disabled={mutating} onClick={()=>void archiveService(row).catch(() => undefined)}>أرشفة</button></div></td></tr>)}</tbody></table></div></section>}
   </>
@@ -743,14 +758,18 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
   const advanceRecord = data.advances.find(row => row.id === request.subjectId)
   const fixedRecord = data.fixedExpenses.find(row => row.id === request.subjectId)
   const serviceRecord = data.services.find(row => row.id === request.subjectId)
+  const incomeRecord = request.action === 'تعديل دخل' ? data.incomes.find(row => row.id === request.subjectId) : undefined
+  const expenseRecord = request.action === 'تعديل مصروف' ? data.expenses.find(row => row.id === request.subjectId) : undefined
+  const editedCash = incomeRecord ?? expenseRecord
+  const linkedExpense = Boolean(expenseRecord && expenseRecord.manual === false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
-  const [incomeType, setIncomeType] = useState('دفعة اشتراك')
-  const [selectedClientId, setSelectedClientId] = useState(request.action === 'تسجيل دفعة اشتراك' ? request.subjectId ?? '' : '')
+  const [incomeType, setIncomeType] = useState(incomeRecord ? incomeFormType(incomeRecord.type) : 'دفعة اشتراك')
+  const [selectedClientId, setSelectedClientId] = useState(editedCash?.clientId ?? (request.action === 'تسجيل دفعة اشتراك' ? request.subjectId ?? '' : ''))
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
   const [advanceKind, setAdvanceKind] = useState('سلفة موظف')
-  const [currency, setCurrency] = useState<Currency>('USD')
-  const initialAmount = fixedRecord?.payable
+  const [currency, setCurrency] = useState<Currency>(editedCash?.currency ?? 'USD')
+  const initialAmount = editedCash?.amount ?? fixedRecord?.payable
     ?? serviceRecord?.payable
     ?? (liabilityRecord ? subtractMoney(liabilityRecord.total, liabilityRecord.paid) : undefined)
     ?? (advanceRecord ? subtractMoney(advanceRecord.amount, advanceRecord.paid) : undefined)
@@ -758,10 +777,10 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
   const [amount, setAmount] = useState(initialAmount)
   const today = businessDate()
   const currentPeriod = today.slice(0, 7)
-  const isIncome = request.action === 'تسجيل دخل' || request.action === 'تسجيل دفعة اشتراك'
-  const isExpense = request.action === 'تسجيل مصروف'
+  const isIncome = request.action === 'تسجيل دخل' || request.action === 'تسجيل دفعة اشتراك' || request.action === 'تعديل دخل'
+  const isExpense = request.action === 'تسجيل مصروف' || request.action === 'تعديل مصروف'
   const needsClient = isIncome && (incomeType === 'دفعة اشتراك' || incomeType === 'دخل عميل إضافي')
-  const currencyActions = ['تسجيل دخل', 'تسجيل دفعة اشتراك', 'تسجيل مصروف', 'دفع ذمة', 'دفع مصروف ثابت', 'دفع اشتراك خدمة']
+  const currencyActions = ['تسجيل دخل', 'تسجيل دفعة اشتراك', 'تسجيل مصروف', 'تعديل دخل', 'تعديل مصروف', 'دفع ذمة', 'دفع مصروف ثابت', 'دفع اشتراك خدمة']
   const amountActions = [...currencyActions, 'إضافة ذمة', 'تسجيل سلفة', 'تسديد سلفة', 'مصروف ثابت جديد', 'اشتراك خدمة جديد']
   const dateActions = [...currencyActions, 'تسجيل سلفة', 'تسديد سلفة', 'دفع راتب']
   const noteActions = [...currencyActions, 'إضافة ذمة', 'تسديد سلفة', 'دفع راتب']
@@ -797,6 +816,24 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
           break
         case 'تسجيل مصروف':
           command = { type: 'expense.create', requestId, payload: { date: value('date'), name: value('name'), category: value('category'), amount, currency, note: optional('note'), clientId: selectedClientId || undefined } }
+          break
+        case 'تعديل دخل':
+          if (!incomeRecord) throw new Error('لم تعد هذه الحركة متاحة. حدّث الصفحة.')
+          command = { type: 'income.update', requestId, payload: {
+            cashEntryId: incomeRecord.cashEntryId, date: value('date'),
+            source: needsClient ? (selectedClientId === incomeRecord.clientId
+              ? incomeRecord.description ?? incomeRecord.source : selectedClient?.name ?? incomeRecord.source) : value('source'),
+            type: incomeType as 'دفعة اشتراك' | 'دخل عميل إضافي' | 'دخل تشغيل إعلانات' | 'دخل خارجي',
+            amount, currency, note: value('note'), clientId: selectedClientId || null, reason: value('reason'),
+          } }
+          break
+        case 'تعديل مصروف':
+          if (!expenseRecord?.cashEntryId) throw new Error('لم تعد هذه الحركة متاحة. حدّث الصفحة.')
+          command = { type: 'expense.update', requestId, payload: {
+            cashEntryId: expenseRecord.cashEntryId, date: value('date'), name: value('name'),
+            category: linkedExpense ? expenseRecord.category : value('category'),
+            amount, currency, note: value('note'), clientId: selectedClientId || null, reason: value('reason'),
+          } }
           break
         case 'إضافة ذمة':
           command = { type: 'liability.create', requestId, payload: { date: value('createdDate'), party: value('name'), kind: value('kind'), clientId: selectedClientId || undefined, description: optional('note'), total: amount, due: value('due') } }
@@ -869,8 +906,8 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
     {request.action === 'تعديل عميل' && clientRecord && <><label className="field"><span>اسم العميل</span><input name="name" required maxLength={200} defaultValue={clientRecord.name}/></label><label className="field"><span>رقم الهاتف</span><input name="phone" dir="ltr" maxLength={50} defaultValue={clientRecord.phone}/></label></>}
     {request.action === 'اشتراك جديد' && <><label className="field"><span>العميل</span><select name="clientId" required defaultValue=""><option value="" disabled>اختر العميل</option>{data.clients.filter(row=>row.active && !row.subscriptionId).map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label><label className="field"><span>الباقة</span><input name="package" required placeholder="مثال: إدارة محتوى"/></label><label className="field"><span>القيمة الشهرية بالدولار</span><input name="monthly" type="number" min="0.01" step="0.01" required/></label></>}
     {request.action === 'تعديل اشتراك' && subscriptionClient && <><label className="field"><span>العميل</span><input value={subscriptionClient.name} readOnly/></label><label className="field"><span>الباقة</span><input name="package" required defaultValue={subscriptionClient.package}/></label><label className="field"><span>القيمة الشهرية</span><input name="monthly" type="number" min="0.01" step="0.01" required defaultValue={subscriptionClient.monthly}/></label><div className="field-help full">تعديل قيمة العقد لا يغيّر الفواتير أو الدفعات السابقة.</div></>}
-    {isIncome && <><label className="field"><span>نوع الدخل</span><select value={incomeType} onChange={event=>{setIncomeType(event.target.value); if (request.action !== 'تسجيل دفعة اشتراك') setSelectedClientId('')}} disabled={request.action === 'تسجيل دفعة اشتراك'}><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select></label>{needsClient ? <label className="field"><span>العميل</span><select required value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="" disabled>اختر العميل</option>{data.clients.filter(row=>row.active).map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label> : <label className="field"><span>المصدر</span><input name="source" required/></label>}</>}
-    {isExpense && <><label className="field"><span>اسم البند</span><input name="name" required/></label><label className="field"><span>التصنيف</span><CategorySelect/></label><label className="field full"><span>مرتبط بعميل — اختياري</span><select value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="">مصروف عام</option>{data.clients.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label></>}
+    {isIncome && <><label className="field"><span>نوع الدخل</span><select value={incomeType} onChange={event=>{const next = event.target.value; setIncomeType(next); if (next !== 'دفعة اشتراك' && next !== 'دخل عميل إضافي') setSelectedClientId('')}} disabled={request.action === 'تسجيل دفعة اشتراك'}><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select></label>{needsClient ? <label className="field"><span>العميل</span><select required value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="" disabled>اختر العميل</option>{selectedClientId && !selectedClient && <option value={selectedClientId}>{editedCash?.client ?? 'العميل المرتبط سابقًا'}</option>}{data.clients.filter(row=>row.active || row.id === selectedClientId).map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label> : <label className="field"><span>المصدر</span><input name="source" required maxLength={200} defaultValue={incomeRecord?.description ?? incomeRecord?.source}/></label>}</>}
+    {isExpense && <><label className="field"><span>اسم البند</span><input name="name" required maxLength={200} defaultValue={expenseRecord?.name}/></label><label className="field"><span>التصنيف</span>{linkedExpense ? <input value={expenseRecord?.category ?? ''} readOnly/> : <CategorySelect defaultValue={expenseRecord?.category}/>}</label><label className="field full"><span>مرتبط بعميل — اختياري</span><select disabled={linkedExpense} value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="">مصروف عام</option>{selectedClientId && !selectedClient && <option value={selectedClientId}>{editedCash?.client ?? 'العميل المرتبط سابقًا'}</option>}{data.clients.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label>{linkedExpense && <div className="field-help full">هذه دفعة مرتبطة بقيد مستقل. يبقى التصنيف والعميل والقيد الأصلي ثابتين، والمبلغ لا يمكن أن يتجاوز مستحقاته. زيادة الراتب تتم من قسم الموظفين.</div>}</>}
     {request.action === 'إضافة ذمة' && <><label className="field"><span>اسم المستفيد</span><input name="name" required/></label><label className="field"><span>النوع</span><select name="kind"><option>مصور</option><option>مودل</option><option>مورد</option><option>مستقل</option><option>أخرى</option></select></label><label className="field full"><span>العميل — اختياري</span><select value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="">ذمة عامة</option>{data.clients.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label><label className="field"><span>تاريخ القيد</span><input name="createdDate" type="date" defaultValue={today} required/></label><label className="field"><span>تاريخ الاستحقاق</span><input name="due" type="date" defaultValue={today} required/></label></>}
     {request.action === 'دفع ذمة' && liabilityRecord && <ReadOnlySummary label="المستفيد" value={liabilityRecord.party} help={`المتبقي ${money(subtractMoney(liabilityRecord.total, liabilityRecord.paid))}`}/>} 
     {request.action === 'إضافة موظف' && <><label className="field"><span>اسم الموظف</span><input name="name" required/></label><label className="field"><span>الراتب الأساسي</span><input name="base" type="number" min="0.01" step="0.01" required/></label></>}
@@ -884,17 +921,20 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
     {request.action === 'اشتراك خدمة جديد' && <><label className="field"><span>اسم الخدمة</span><input name="name" required/></label><label className="field"><span>التصنيف</span><CategorySelect defaultValue="برامج"/></label><label className="field"><span>الدورة</span><select name="cycle" defaultValue="شهري"><option>شهري</option><option>سنوي</option><option>مرة واحدة</option></select></label><label className="field"><span>التجديد القادم</span><input name="next" type="date" defaultValue={today} required/></label></>}
     {request.action === 'تعديل اشتراك خدمة' && serviceRecord && <><label className="field"><span>اسم الخدمة</span><input name="name" required defaultValue={serviceRecord.name}/></label><label className="field"><span>التصنيف</span><CategorySelect defaultValue={serviceRecord.category}/></label><label className="field"><span>المبلغ</span><input name="serviceAmount" type="number" min="0.01" step="0.01" required defaultValue={serviceRecord.amount}/></label><label className="field"><span>الدورة</span><select name="cycle" defaultValue={serviceRecord.cycle}><option>شهري</option><option>سنوي</option><option>مرة واحدة</option></select></label><label className="field"><span>التجديد القادم</span><input name="next" type="date" defaultValue={serviceRecord.next} required/></label></>}
     {request.action === 'دفع اشتراك خدمة' && serviceRecord && <ReadOnlySummary label="الخدمة" value={serviceRecord.name} help={`القسط الأقدم المستحق ${money(serviceRecord.payable)} — إجمالي المتأخرات ${money(serviceRecord.outstanding)}`}/>} 
-    {amountActions.includes(request.action) && <label className="field"><span>المبلغ</span><input name="amount" type="number" min="0.01" step="0.01" required value={amount} onChange={event=>setAmount(event.target.value)}/></label>}
+    {amountActions.includes(request.action) && <label className="field"><span>المبلغ</span><input name="amount" type="number" min={editedCash ? '0.0001' : '0.01'} step={editedCash ? '0.0001' : '0.01'} required value={amount} onChange={event=>setAmount(event.target.value)}/></label>}
     {currencyActions.includes(request.action) && <label className="field"><span>العملة</span><select value={currency} onChange={event=>{setCurrency(event.target.value as Currency); setAmount('')}}><option value="USD">دولار USD</option><option value="SYP">ليرة سورية SYP</option></select></label>}
-    {dateActions.includes(request.action) && <label className="field"><span>التاريخ</span><input name="date" type="date" defaultValue={today} required/></label>}
+    {dateActions.includes(request.action) && <label className="field"><span>التاريخ</span><input name="date" type="date" defaultValue={editedCash?.date ?? today} required/></label>}
     {request.action === 'تسجيل دفعة اشتراك' && selectedClient && <div className="allocation-preview full"><div><small>الاشتراك الشهري</small><b>{money(selectedClient.monthly)}</b></div><div><small>الرصيد قبل الدفعة</small><b>{money(balanceBefore)}</b></div><div><small>التوزيع</small><b>أقدم فاتورة ثم التي تليها</b></div><div><small>الرصيد بعد الدفعة</small><b>{money(balanceAfter)}</b></div></div>}
-    {noteActions.includes(request.action) && <label className="field full"><span>ملاحظات</span><input name="note" maxLength={request.action === 'إضافة ذمة' ? 300 : 4000}/></label>}
+    {noteActions.includes(request.action) && <label className="field full"><span>ملاحظات</span><input name="note" maxLength={request.action === 'إضافة ذمة' ? 300 : 4000} defaultValue={editedCash?.note}/></label>}
+    {editedCash && <><label className="field full"><span>سبب التعديل</span><input name="reason" required minLength={3} maxLength={1000} placeholder="مثال: تصحيح قيمة المبلغ المدخل"/></label><div className="field-help full">سيظهر تحت الحركة ما تغيّر، واسم حساب المستخدم، والتاريخ والوقت. تبقى الحركة الأصلية محفوظة في الصندوق للمراجعة.</div></>}
     <div className="form-actions full"><button type="button" className="btn ghost" disabled={mutating} onClick={onClose}>إلغاء</button><button type="submit" className="btn primary" disabled={mutating}>{mutating ? 'جاري الحفظ…' : 'حفظ'}</button></div>
   </form>}</section></div>
 }
 
 function CategorySelect({ defaultValue = 'تشغيل' }: { defaultValue?: string }) {
-  return <select name="category" defaultValue={defaultValue}><option>تشغيل</option><option>رواتب</option><option>أجار</option><option>خدمات</option><option>برامج</option><option>استضافة</option><option>أخرى</option></select>
+  const categories = ['تشغيل', 'رواتب', 'أجار', 'خدمات', 'برامج', 'استضافة', 'أخرى']
+  if (!categories.includes(defaultValue)) categories.unshift(defaultValue)
+  return <select name="category" defaultValue={defaultValue}>{categories.map(category => <option key={category}>{category}</option>)}</select>
 }
 
 function ReadOnlySummary({ label, value, help }: { label: string; value: string; help: string }) {

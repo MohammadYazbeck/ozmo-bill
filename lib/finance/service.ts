@@ -27,6 +27,7 @@ import {
   SubscriptionStatus,
 } from '@prisma/client'
 import { db } from '@/lib/db'
+import { buildCashEditHistories } from '@/lib/finance/edit-history'
 import type {
   AdvanceDto,
   CashLedgerEntryDto,
@@ -262,6 +263,9 @@ async function applyCommand(
       return archiveSubscription(tx, context, command.payload.subscriptionId)
     case 'income.create':
       return createIncome(tx, context, command.payload)
+    case 'income.update':
+    case 'expense.update':
+      return editCashEntry(tx, context, command, command.requestId)
     case 'cashEntry.reverse':
       return reverseCashEntry(tx, context, command.payload, command.requestId)
     case 'expense.create':
@@ -598,6 +602,187 @@ async function createExpense(
     expenseCategoryId: category.id,
   })
   return mutation('CashEntry', cash.id, AuditAction.POST)
+}
+
+/** Corrections are append-only: never overwrite posted cash or its applications. */
+export async function editCashEntry(
+  tx: Tx,
+  context: PeriodContext,
+  command: Extract<FinanceCommand, { type: 'income.update' | 'expense.update' }>,
+  requestId: string,
+): Promise<MutationResult> {
+  const payload = command.payload
+  const original = await tx.cashEntry.findFirst({
+    where: { id: payload.cashEntryId, organizationId: ORGANIZATION_ID },
+    include: {
+      client: { select: { name: true } }, expenseCategory: { select: { name: true } },
+      reversedBy: { select: { id: true } },
+      customerPayment: { include: { allocations: true } },
+      liabilityPayment: { include: { liability: { include: { payments: {
+        where: { cashEntry: { status: CashEntryStatus.POSTED } },
+      } } } } },
+      payrollPayment: { include: { payrollItem: { include: {
+        payrollRun: true,
+        payments: { where: { cashEntry: { status: CashEntryStatus.POSTED } } },
+      } } } },
+      recurringExpensePayment: { include: { occurrence: { include: {
+        payments: { where: { cashEntry: { status: CashEntryStatus.POSTED } } },
+      } } } },
+      servicePayment: { include: { serviceCharge: { include: {
+        payments: { where: { cashEntry: { status: CashEntryStatus.POSTED } } },
+      } } } },
+    },
+  })
+  if (!original) throw notFound('Cash entry')
+  if (original.status !== CashEntryStatus.POSTED || original.reversedBy) {
+    throw conflict('تم تعديل أو عكس هذه الحركة مسبقًا. حدّث الصفحة قبل المحاولة مجددًا.')
+  }
+  const income = command.type === 'income.update'
+  const allowedKinds: CashEntryKind[] = income
+    ? [CashEntryKind.SUBSCRIPTION_PAYMENT, CashEntryKind.CLIENT_EXTRA_INCOME,
+      CashEntryKind.ADVERTISING_INCOME, CashEntryKind.EXTERNAL_INCOME]
+    : [CashEntryKind.MANUAL_EXPENSE, CashEntryKind.LIABILITY_PAYMENT,
+      CashEntryKind.PAYROLL_PAYMENT, CashEntryKind.RECURRING_EXPENSE_PAYMENT, CashEntryKind.SERVICE_PAYMENT]
+  if (!allowedKinds.includes(original.kind)
+    || original.direction !== (income ? CashDirection.INFLOW : CashDirection.OUTFLOW)) {
+    throw conflict('هذه الحركة لا يمكن تعديلها من هذا القسم.')
+  }
+  if (original.kind === CashEntryKind.SUBSCRIPTION_PAYMENT && !original.customerPayment) {
+    throw invariant('Subscription payment application is missing.')
+  }
+
+  const clientId = payload.clientId ?? null
+  if (clientId && clientId !== original.clientId) await requireClient(tx, clientId)
+  const manual = original.kind === CashEntryKind.MANUAL_EXPENSE
+  let kind = original.kind
+  let categoryId = original.expenseCategoryId
+  let categoryName = original.expenseCategory?.name ?? cashKindLabel(original.kind)
+  let description: string
+  if (command.type === 'income.update') {
+    const requiresClient = command.payload.type === 'دفعة اشتراك' || command.payload.type === 'دخل عميل إضافي'
+    if (requiresClient && !clientId) throw conflict('اختر العميل المرتبط بهذا الدخل.')
+    if (!requiresClient && clientId) throw conflict('دخل الإعلانات والدخل الخارجي لا يرتبطان بعميل.')
+    kind = command.payload.type === 'دفعة اشتراك' ? CashEntryKind.SUBSCRIPTION_PAYMENT
+      : clientId ? CashEntryKind.CLIENT_EXTRA_INCOME : incomeKind(command.payload.type)
+    description = command.payload.source
+  } else {
+    description = command.payload.name
+    if (!manual && (clientId !== original.clientId || command.payload.category !== categoryName)) {
+      throw conflict('لا يمكن تغيير عميل أو تصنيف دفعة مرتبطة براتب أو ذمة أو مصروف ثابت أو خدمة.')
+    }
+    if (manual) {
+      const category = await resolveExpenseCategory(tx, command.payload.category)
+      categoryId = category.id
+      categoryName = category.name
+    }
+  }
+  const occurredOn = parseDate(payload.date)
+  if (occurredOn.getTime() > context.today.getTime()) throw conflict('لا يمكن تسجيل حركة بتاريخ مستقبلي.')
+  const note = payload.note ?? ''
+  if (sameDate(occurredOn, original.occurredOn) && decimal(payload.amount).eq(original.amountOriginal)
+    && payload.currency === original.currency && description === original.description
+    && note === (original.note ?? '') && clientId === original.clientId
+    && categoryId === original.expenseCategoryId && kind === original.kind) {
+    throw conflict('لم تغيّر أي قيمة في الحركة.')
+  }
+
+  // Reuse the booked historical rate for edits on the same date/currency.
+  const historicalRate = payload.currency === original.currency && sameDate(occurredOn, original.occurredOn)
+    ? original.currencyUnitsPerUsd : undefined
+  const reversal = await createCompensatingCashEntry(tx, original, context.today, payload.reason)
+  const cash = await createCashEntry(tx, context, {
+    direction: original.direction, kind, occurredOn, amount: decimal(payload.amount),
+    currency: payload.currency as CurrencyCode, description, note,
+    clientId: clientId ?? undefined, expenseCategoryId: categoryId ?? undefined,
+    historicalRate,
+  })
+
+  if (original.customerPayment) {
+    for (const invoiceId of new Set(original.customerPayment.allocations.map(item => item.invoiceId))) {
+      await refreshInvoiceStatus(tx, invoiceId, requestId)
+    }
+  }
+  if (kind === CashEntryKind.SUBSCRIPTION_PAYMENT && clientId) {
+    const payment = await tx.customerPayment.create({ data: {
+      organizationId: ORGANIZATION_ID, clientId, cashEntryId: cash.id,
+      receiptNumber: await nextDocumentNumber(tx, DocumentType.RECEIPT, yearOf(payload.date)),
+      receivedOn: occurredOn, note,
+    } })
+    if (original.customerPayment && clientId === original.clientId && cash.amountUsd.eq(original.amountUsd)) {
+      // A description/date-only edit must not move the payment to other invoices.
+      for (const allocation of original.customerPayment.allocations) {
+        await tx.paymentAllocation.create({ data: {
+          paymentId: payment.id, invoiceId: allocation.invoiceId, amountUsd: allocation.amountUsd,
+        } })
+        await refreshInvoiceStatus(tx, allocation.invoiceId, requestId)
+      }
+    } else {
+      await allocatePaymentFifo(tx, payment.id, clientId, cash.amountUsd)
+    }
+  }
+
+  // Rebind to the SAME payable/period, not whatever is currently the oldest due item.
+  const otherPaid = (payments: { cashEntryId: string; appliedAmountUsd: Prisma.Decimal }[]) => (
+    sumDecimal(payments.filter(item => item.cashEntryId !== original.id).map(item => item.appliedAmountUsd))
+  )
+  const validatePayment = (total: Prisma.Decimal, payments: { cashEntryId: string; appliedAmountUsd: Prisma.Decimal }[], start: Date) => {
+    if (occurredOn.getTime() < start.getTime()) throw conflict('تاريخ الدفع لا يمكن أن يسبق القيد المرتبط به.')
+    if (cash.amountUsd.gt(total.minus(otherPaid(payments)))) throw conflict('المبلغ يتجاوز المتبقي على القيد المرتبط بهذه الدفعة.')
+  }
+  const paymentData = { cashEntryId: cash.id, appliedAmountUsd: cash.amountUsd, paidOn: occurredOn }
+  if (original.kind === CashEntryKind.LIABILITY_PAYMENT) {
+    const binding = original.liabilityPayment
+    if (!binding || binding.liability.voidedAt || binding.liability.status === LiabilityStatus.VOID) throw conflict('الذمة المرتبطة غير متاحة.')
+    validatePayment(binding.liability.amountUsd, binding.liability.payments, binding.liability.incurredOn)
+    await tx.liabilityPayment.create({ data: { ...paymentData, liabilityId: binding.liabilityId } })
+    await refreshLiabilityStatus(tx, binding.liabilityId, requestId)
+  }
+  if (original.kind === CashEntryKind.PAYROLL_PAYMENT) {
+    const binding = original.payrollPayment
+    if (!binding || binding.payrollItem.status === PayrollItemStatus.VOID) throw conflict('الراتب المرتبط غير متاح.')
+    validatePayment(binding.payrollItem.netPayUsd, binding.payrollItem.payments, binding.payrollItem.payrollRun.periodStart)
+    await tx.payrollPayment.create({ data: { ...paymentData, payrollItemId: binding.payrollItemId } })
+    await refreshPayrollItemStatus(tx, binding.payrollItemId, requestId)
+    await refreshPayrollRunStatus(tx, binding.payrollItem.payrollRunId, requestId)
+  }
+  if (original.kind === CashEntryKind.RECURRING_EXPENSE_PAYMENT) {
+    const binding = original.recurringExpensePayment
+    if (!binding || binding.occurrence.status === PayableStatus.WAIVED) throw conflict('المصروف الثابت المرتبط غير متاح.')
+    validatePayment(binding.occurrence.expectedUsd, binding.occurrence.payments, binding.occurrence.periodStart)
+    await tx.recurringExpensePayment.create({ data: { ...paymentData, occurrenceId: binding.occurrenceId } })
+    await refreshRecurringOccurrenceStatus(tx, binding.occurrenceId, requestId)
+  }
+  if (original.kind === CashEntryKind.SERVICE_PAYMENT) {
+    const binding = original.servicePayment
+    if (!binding || binding.serviceCharge.status === PayableStatus.WAIVED) throw conflict('اشتراك الخدمة المرتبط غير متاح.')
+    validatePayment(binding.serviceCharge.expectedUsd, binding.serviceCharge.payments, binding.serviceCharge.periodStart)
+    await tx.servicePayment.create({ data: { ...paymentData, serviceChargeId: binding.serviceChargeId } })
+    await refreshServiceChargeStatus(tx, binding.serviceChargeId, requestId)
+  }
+
+  const clientName = clientId === original.clientId ? original.client?.name
+    : clientId ? (await tx.client.findUnique({ where: { id: clientId }, select: { name: true } }))?.name : undefined
+  const facts = (entry: typeof cash, client: string | undefined, category: string) => ({
+    date: dateText(entry.occurredOn), description: entry.description, type: cashKindLabel(entry.kind),
+    amount: money(entry.amountOriginal), currency: entry.currency, usd: money(entry.amountUsd),
+    exchangeRate: moneyRate(entry.currencyUnitsPerUsd), client: client ?? '', category,
+    note: entry.note ?? '',
+  })
+  await createCorrectionAudit(tx, {
+    requestId, action: AuditAction.REVERSE, entityType: 'CashEntry', entityId: original.id,
+    before: { status: original.status }, after: { status: CashEntryStatus.REVERSED },
+    metadata: { source: 'cash-entry-edit', replacementCashEntryId: cash.id, reason: payload.reason },
+  })
+  await createCorrectionAudit(tx, {
+    requestId, action: AuditAction.POST, entityType: 'CashEntry', entityId: reversal.id,
+    after: { reversalOfId: original.id }, metadata: { source: 'cash-entry-edit', reason: payload.reason },
+  })
+  return {
+    entityType: 'CashEntry', entityId: cash.id, action: AuditAction.UPDATE,
+    before: facts(original, original.client?.name, original.expenseCategory?.name ?? cashKindLabel(original.kind)),
+    after: facts(cash, clientName, income ? cashKindLabel(kind) : categoryName),
+    metadata: { source: 'cash-entry-edit', previousCashEntryId: original.id, reason: payload.reason },
+  }
 }
 
 async function reverseCashEntry(
@@ -1124,7 +1309,6 @@ async function payPayroll(
 
   let result = mutation('PayrollItem', item.id, AuditAction.UPDATE)
   if (remaining.gt(ZERO)) {
-    const payrollCategory = await resolveExpenseCategory(tx, 'رواتب')
     const cash = await createCashEntry(tx, context, {
       direction: CashDirection.OUTFLOW,
       kind: CashEntryKind.PAYROLL_PAYMENT,
@@ -1133,7 +1317,7 @@ async function payPayroll(
       currency: CurrencyCode.USD,
       description: `راتب ${item.employee.name} - ${payload.period}`,
       note: payload.note,
-      expenseCategoryId: payrollCategory.id,
+      // Payroll applications require a null category; the display category is derived from kind.
     })
     const payment = await tx.payrollPayment.create({
       data: {
@@ -2092,6 +2276,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     services,
     payrollAdvanceRepayments,
     latestAudit,
+    editAudits,
   ] = await Promise.all([
     tx.client.findMany({
       where: { organizationId: ORGANIZATION_ID, archivedAt: null },
@@ -2238,7 +2423,16 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
       select: { id: true, occurredAt: true },
     }),
+    tx.auditEvent.findMany({
+      where: {
+        organizationId: ORGANIZATION_ID, entityType: 'CashEntry', action: AuditAction.UPDATE,
+        metadata: { path: ['source'], equals: 'cash-entry-edit' },
+      },
+      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+      select: { id: true, entityId: true, actor: true, occurredAt: true, before: true, after: true, metadata: true },
+    }),
   ])
+  const editHistories = buildCashEditHistories(editAudits)
 
   const activeCashEntries = cashEntries.filter(entry => (
     entry.status === CashEntryStatus.POSTED && entry.kind !== CashEntryKind.REVERSAL
@@ -2317,6 +2511,8 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       cashEntryId: entry.id,
       date: dateText(entry.occurredOn),
       source: entry.client?.name ?? entry.description,
+      description: entry.description,
+      editHistory: editHistories.get(entry.id) ?? [],
       type: cashKindLabel(entry.kind),
       amount: money(entry.amountOriginal),
       currency: entry.currency,
@@ -2338,6 +2534,8 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       cashEntryId: entry.id,
       date: dateText(entry.occurredOn),
       name: entry.description,
+      manual: entry.kind === CashEntryKind.MANUAL_EXPENSE,
+      editHistory: editHistories.get(entry.id) ?? [],
       category: entry.expenseCategory?.name ?? cashKindLabel(entry.kind),
       amount: money(entry.amountOriginal),
       currency: entry.currency,
@@ -2578,6 +2776,7 @@ type CashEntryInput = {
   note?: string
   clientId?: string
   expenseCategoryId?: string
+  historicalRate?: Prisma.Decimal
 }
 
 type ReversibleCashEntry = {
@@ -2604,9 +2803,9 @@ async function createCashEntry(tx: Tx, context: PeriodContext, input: CashEntryI
   }
   const rate = input.currency === CurrencyCode.USD
     ? ONE
-    : sameDate(input.occurredOn, context.today)
+    : input.historicalRate ?? (sameDate(input.occurredOn, context.today)
       ? context.exchangeRate
-      : await exchangeRateForDate(tx, input.occurredOn)
+      : await exchangeRateForDate(tx, input.occurredOn))
   const amountUsd = toUsd(input.amount, input.currency, rate)
   if (amountUsd.lte(ZERO)) {
     throw conflict('The amount is too small at the current exchange rate.')

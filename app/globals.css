@@ -106,6 +106,13 @@ td.strong, .strong { color: var(--ink); font-weight: 700; }
 .table-action { min-height: 29px; padding: 0 9px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--ink); font-size: 10px; font-weight: 700; }
 .table-action:hover:not(:disabled) { border-color: var(--orange); color: var(--orange); }
 .table-action:disabled { cursor: default; color: #999; background: #f1efed; }
+.cash-history-row td { background: #fffaf3; white-space: normal; padding-top: 8px; }
+.cash-edit-history { border-inline-start: 3px solid var(--orange); padding: 8px 12px; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
+.cash-edit-history p { margin: 0 0 4px; }
+.cash-edit-history ul { display: flex; flex-wrap: wrap; gap: 4px 22px; margin: 0 0 4px; padding-inline-start: 16px; }
+.cash-edit-history small { color: #806f63; }
+.cash-edit-history summary { cursor: pointer; margin-top: 6px; color: #806f63; }
+.cash-edit-history details article { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 .table-action.danger-action { border-color: #f0c9cf; color: var(--red); background: #fffafb; }
 .table-action.danger-action:hover:not(:disabled) { border-color: var(--red); color: #9e1e33; background: #fff1f3; }
 
