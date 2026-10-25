@@ -56,3 +56,19 @@ export function buildCashEditHistories(audits: EditAudit[]) {
   }
   return histories
 }
+
+/** Liability links keep the same entity ID, so retain every event instead of replacing by ID. */
+export function buildLiabilityClientHistories(audits: EditAudit[]) {
+  const histories = new Map<string, CashEntryEditDto[]>()
+  for (const event of audits) {
+    const metadata = record(event.metadata)
+    const history = histories.get(event.entityId) ?? []
+    history.push({
+      id: event.id, actor: event.actor || 'غير محدد', occurredAt: event.occurredAt.toISOString(),
+      reason: typeof metadata.reason === 'string' ? metadata.reason : '',
+      changes: cashEditChanges(event.before, event.after),
+    })
+    histories.set(event.entityId, history)
+  }
+  return histories
+}

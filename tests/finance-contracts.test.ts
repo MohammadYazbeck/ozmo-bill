@@ -162,6 +162,7 @@ describe('finance command contract', () => {
       ['cashEntry.reverse', { cashEntryId: entityId, date: '2026-09-30', reason: 'Duplicate posting' }],
       ['expense.create', { date: '2026-09-30', name: 'Rent', category: 'Office', amount: 100, currency: 'USD' }],
       ['liability.create', { date: '2026-09-30', party: 'Supplier', kind: 'Supplier', total: 100, due: '2026-10-01' }],
+      ['liability.setClient', { liabilityId: entityId, clientId: entityId, expectedClientId: null, reason: 'Direct client cost' }],
       ['liability.pay', { liabilityId: entityId, date: '2026-09-30', amount: 10, currency: 'USD' }],
       ['employee.create', { name: 'Employee', base: 500 }],
       ['employee.update', { employeeId: entityId, base: 550 }],

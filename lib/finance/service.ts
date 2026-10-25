@@ -27,7 +27,7 @@ import {
   SubscriptionStatus,
 } from '@prisma/client'
 import { db } from '@/lib/db'
-import { buildCashEditHistories } from '@/lib/finance/edit-history'
+import { buildCashEditHistories, buildLiabilityClientHistories } from '@/lib/finance/edit-history'
 import type {
   AdvanceDto,
   CashLedgerEntryDto,
@@ -274,6 +274,8 @@ async function applyCommand(
       return createLiability(tx, context, command.payload)
     case 'liability.pay':
       return payLiability(tx, context, command.payload)
+    case 'liability.setClient':
+      return setLiabilityClient(tx, command.payload)
     case 'employee.create':
       return createEmployee(tx, context, command.payload)
     case 'employee.update':
@@ -1064,6 +1066,38 @@ async function createLiability(
     },
   })
   return mutation('Liability', liability.id, AuditAction.CREATE)
+}
+
+/** Reclassify an unpaid obligation without creating cash or altering any posted payment. */
+export async function setLiabilityClient(
+  tx: Tx,
+  payload: Extract<FinanceCommand, { type: 'liability.setClient' }>['payload'],
+): Promise<MutationResult> {
+  const liability = await tx.liability.findFirst({
+    where: { id: payload.liabilityId, organizationId: ORGANIZATION_ID, voidedAt: null, status: { not: LiabilityStatus.VOID } },
+    include: { client: { select: { name: true } }, _count: { select: { payments: true } } },
+  })
+  if (!liability) throw notFound('Liability')
+  if (liability.clientId !== payload.expectedClientId) throw conflict('تغيّر ربط الذمة. حدّث الصفحة قبل المحاولة مجددًا.')
+  if (liability.clientId === payload.clientId) throw conflict('لم تغيّر العميل المرتبط بالذمة.')
+  // Even reversed payments retain historical client/application facts. Never rewrite their parent.
+  if (liability._count.payments > 0) throw conflict('لا يمكن تغيير ربط ذمة لها دفعات سابقة، حفاظًا على توزيع التكاليف وسجل الدفع.')
+  if (payload.clientId) await requireClient(tx, payload.clientId)
+  const client = payload.clientId ? await tx.client.findUnique({ where: { id: payload.clientId }, select: { name: true } }) : null
+  const updated = await tx.liability.updateMany({
+    where: {
+      id: liability.id, organizationId: ORGANIZATION_ID, voidedAt: null,
+      clientId: payload.expectedClientId, payments: { none: {} },
+    },
+    data: { clientId: payload.clientId },
+  })
+  if (updated.count !== 1) throw conflict('تغيّرت الذمة أثناء الحفظ. حدّث الصفحة وحاول مجددًا.')
+  return {
+    entityType: 'Liability', entityId: liability.id, action: AuditAction.UPDATE,
+    before: { clientId: liability.clientId, client: liability.client?.name ?? 'ذمة عامة' },
+    after: { clientId: payload.clientId, client: client?.name ?? 'ذمة عامة' },
+    metadata: { source: 'liability-client-link', reason: payload.reason },
+  }
 }
 
 async function payLiability(
@@ -2277,6 +2311,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     payrollAdvanceRepayments,
     latestAudit,
     editAudits,
+    liabilityLinkAudits,
   ] = await Promise.all([
     tx.client.findMany({
       where: { organizationId: ORGANIZATION_ID, archivedAt: null },
@@ -2333,6 +2368,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     tx.liability.findMany({
       where: { organizationId: ORGANIZATION_ID, voidedAt: null },
       include: {
+        _count: { select: { payments: true } },
         client: { select: { name: true } },
         payments: {
           where: { cashEntry: { status: CashEntryStatus.POSTED } },
@@ -2431,8 +2467,17 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
       select: { id: true, entityId: true, actor: true, occurredAt: true, before: true, after: true, metadata: true },
     }),
+    tx.auditEvent.findMany({
+      where: {
+        organizationId: ORGANIZATION_ID, entityType: 'Liability', action: AuditAction.UPDATE,
+        metadata: { path: ['source'], equals: 'liability-client-link' },
+      },
+      orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+      select: { id: true, entityId: true, actor: true, occurredAt: true, before: true, after: true, metadata: true },
+    }),
   ])
   const editHistories = buildCashEditHistories(editAudits)
+  const liabilityLinkHistories = buildLiabilityClientHistories(liabilityLinkAudits)
 
   const activeCashEntries = cashEntries.filter(entry => (
     entry.status === CashEntryStatus.POSTED && entry.kind !== CashEntryKind.REVERSAL
@@ -2567,6 +2612,8 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     date: dateText(liability.incurredOn),
     party: liability.payeeName,
     kind: liabilityPartyLabel(liability.partyType),
+    clientLinkEditable: liability._count.payments === 0,
+    clientLinkHistory: liabilityLinkHistories.get(liability.id) ?? [],
     ...(liability.clientId ? { clientId: liability.clientId } : {}),
     client: liability.client?.name ?? '',
     description: liability.description,

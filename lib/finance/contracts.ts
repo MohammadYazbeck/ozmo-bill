@@ -158,6 +158,8 @@ export type CashEntryEditDto = {
 export type LiabilityDto = Omit<LiabilityRecord, 'total' | 'paid'> & {
   total: MoneyString
   paid: MoneyString
+  clientLinkEditable?: boolean
+  clientLinkHistory?: CashEntryEditDto[]
 }
 
 export type EmployeeDto = Omit<EmployeeRecord, 'base' | 'bonus' | 'deductions' | 'loan'> & {
@@ -429,6 +431,12 @@ export const financeCommandSchema = z.discriminatedUnion('type', [
     amount: positiveMoneyInputSchema,
     currency: currencySchema,
     note: noteSchema,
+  })),
+  command('liability.setClient', z.strictObject({
+    liabilityId: entityIdSchema,
+    clientId: entityIdSchema.nullable(),
+    expectedClientId: entityIdSchema.nullable(),
+    reason: reversalReasonSchema,
   })),
   command('employee.create', z.strictObject({
     name: shortTextSchema,
