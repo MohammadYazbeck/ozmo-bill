@@ -322,7 +322,16 @@ const subscriptionUpdatePayload = requireChange(z.strictObject({
   subscriptionId: entityIdSchema,
   package: shortTextSchema.optional(),
   monthly: positiveMoneyInputSchema.optional(),
-}), ['package', 'monthly'])
+  invoiceScope: z.enum(['currentMonth', 'futureInvoices']).default('futureInvoices'),
+  invoiceId: entityIdSchema.optional(),
+  expectedInvoiceTotal: nonNegativeMoneyInputSchema.optional(),
+  reason: reversalReasonSchema.optional(),
+}), ['package', 'monthly']).superRefine((payload, context) => {
+  if (payload.invoiceScope !== 'currentMonth') return
+  for (const field of ['invoiceId', 'expectedInvoiceTotal', 'reason'] as const) {
+    if (payload[field] === undefined) context.addIssue({ code: 'custom', path: [field], message: 'Required when updating the current invoice' })
+  }
+})
 
 const employeeUpdatePayload = requireChange(z.strictObject({
   employeeId: entityIdSchema,

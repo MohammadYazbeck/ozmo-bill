@@ -785,6 +785,7 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
   const expenseRecord = request.action === 'تعديل مصروف' ? data.expenses.find(row => row.id === request.subjectId) : undefined
   const editedCash = incomeRecord ?? expenseRecord
   const linkedExpense = Boolean(expenseRecord && expenseRecord.manual === false)
+  const [subscriptionInvoiceScope, setSubscriptionInvoiceScope] = useState<'currentMonth' | 'futureInvoices'>(subscriptionClient?.currentInvoiceId ? 'currentMonth' : 'futureInvoices')
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [incomeType, setIncomeType] = useState(incomeRecord ? incomeFormType(incomeRecord.type) : 'دفعة اشتراك')
@@ -831,7 +832,18 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
           break
         case 'تعديل اشتراك':
           if (!subscriptionClient?.subscriptionId) throw new Error('لم يعد هذا الاشتراك متاحًا.')
-          command = { type: 'subscription.update', requestId, payload: { subscriptionId: subscriptionClient.subscriptionId, package: value('package'), monthly: value('monthly') } }
+          if (subscriptionInvoiceScope === 'currentMonth' && (!subscriptionClient.currentInvoiceId || subscriptionClient.currentInvoiceTotal === undefined)) {
+            throw new Error('بيانات فاتورة الشهر غير متاحة. حدّث الصفحة قبل تعديلها.')
+          }
+          command = { type: 'subscription.update', requestId, payload: {
+            subscriptionId: subscriptionClient.subscriptionId, package: value('package'), monthly: value('monthly'),
+            invoiceScope: subscriptionInvoiceScope,
+            ...(subscriptionInvoiceScope === 'currentMonth' ? {
+              invoiceId: subscriptionClient.currentInvoiceId,
+              expectedInvoiceTotal: subscriptionClient.currentInvoiceTotal,
+              reason: value('invoiceReason'),
+            } : {}),
+          } }
           break
         case 'تسجيل دخل':
         case 'تسجيل دفعة اشتراك':
@@ -935,7 +947,20 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
     {request.action === 'عميل جديد' && <><label className="field"><span>اسم العميل</span><input name="name" required maxLength={200}/></label><label className="field"><span>رقم الهاتف</span><input name="phone" dir="ltr" maxLength={50}/></label></>}
     {request.action === 'تعديل عميل' && clientRecord && <><label className="field"><span>اسم العميل</span><input name="name" required maxLength={200} defaultValue={clientRecord.name}/></label><label className="field"><span>رقم الهاتف</span><input name="phone" dir="ltr" maxLength={50} defaultValue={clientRecord.phone}/></label></>}
     {request.action === 'اشتراك جديد' && <><label className="field"><span>العميل</span><select name="clientId" required defaultValue=""><option value="" disabled>اختر العميل</option>{data.clients.filter(row=>row.active && !row.subscriptionId).map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label><label className="field"><span>الباقة</span><input name="package" required placeholder="مثال: إدارة محتوى"/></label><label className="field"><span>القيمة الشهرية بالدولار</span><input name="monthly" type="number" min="0.01" step="0.01" required/></label></>}
-    {request.action === 'تعديل اشتراك' && subscriptionClient && <><label className="field"><span>العميل</span><input value={subscriptionClient.name} readOnly/></label><label className="field"><span>الباقة</span><input name="package" required defaultValue={subscriptionClient.package}/></label><label className="field"><span>القيمة الشهرية</span><input name="monthly" type="number" min="0.01" step="0.01" required defaultValue={subscriptionClient.monthly}/></label><div className="field-help full">تعديل قيمة العقد لا يغيّر الفواتير أو الدفعات السابقة.</div></>}
+    {request.action === 'تعديل اشتراك' && subscriptionClient && <>
+      <label className="field"><span>العميل</span><input value={subscriptionClient.name} readOnly/></label>
+      <label className="field"><span>الباقة</span><input name="package" required defaultValue={subscriptionClient.package}/></label>
+      <label className="field"><span>القيمة الشهرية</span><input name="monthly" type="number" min="0.01" step="0.01" required defaultValue={subscriptionClient.monthly}/></label>
+      <label className="field full"><span>تطبيق التعديل على</span><select value={subscriptionInvoiceScope} onChange={event=>setSubscriptionInvoiceScope(event.target.value as 'currentMonth' | 'futureInvoices')}>
+        <option value="currentMonth" disabled={!subscriptionClient.currentInvoiceId}>فاتورة الشهر الحالي ({currentPeriod}) والفواتير القادمة</option>
+        <option value="futureInvoices">الفواتير القادمة فقط — إبقاء فاتورة هذا الشهر كما هي</option>
+      </select></label>
+      {subscriptionInvoiceScope === 'currentMonth' && <>
+        <ReadOnlySummary label="فاتورة الشهر قبل التعديل" value={money(subscriptionClient.currentInvoiceTotal ?? '0')} help={`المدفوع ${money(subscriptionClient.currentInvoicePaid ?? '0')} — المتبقي ${money(subscriptionClient.currentInvoiceDue ?? '0')}`}/>
+        <label className="field full"><span>سبب تعديل فاتورة الشهر</span><input name="invoiceReason" required minLength={3} maxLength={1000} placeholder="مثال: تصحيح اشتراك الشهر من 600 إلى 450"/></label>
+      </>}
+      <div className="field-help full">عند تطبيق التعديل على هذا الشهر، يُعاد احتساب فاتورته والمتبقي بعد خصم دفعاتها الفعلية. تبقى فواتير الأشهر الأقدم والدفعات محفوظة. لا يتم إنشاء دخل أو مصروف أو قيد عكسي، ولا يُسمح بقيمة فاتورة أقل من المدفوع عليها.</div>
+    </>}
     {isIncome && <><label className="field"><span>نوع الدخل</span><select value={incomeType} onChange={event=>{const next = event.target.value; setIncomeType(next); if (next !== 'دفعة اشتراك' && next !== 'دخل عميل إضافي') setSelectedClientId('')}} disabled={request.action === 'تسجيل دفعة اشتراك'}><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select></label>{needsClient ? <label className="field"><span>العميل</span><select required value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="" disabled>اختر العميل</option>{selectedClientId && !selectedClient && <option value={selectedClientId}>{editedCash?.client ?? 'العميل المرتبط سابقًا'}</option>}{data.clients.filter(row=>row.active || row.id === selectedClientId).map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label> : <label className="field"><span>المصدر</span><input name="source" required maxLength={200} defaultValue={incomeRecord?.description ?? incomeRecord?.source}/></label>}</>}
     {isExpense && <><label className="field"><span>اسم البند</span><input name="name" required maxLength={200} defaultValue={expenseRecord?.name}/></label><label className="field"><span>التصنيف</span>{linkedExpense ? <input value={expenseRecord?.category ?? ''} readOnly/> : <CategorySelect defaultValue={expenseRecord?.category}/>}</label><label className="field full"><span>مرتبط بعميل — اختياري</span><select disabled={linkedExpense} value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="">مصروف عام</option>{selectedClientId && !selectedClient && <option value={selectedClientId}>{editedCash?.client ?? 'العميل المرتبط سابقًا'}</option>}{data.clients.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label>{linkedExpense && <div className="field-help full">هذه دفعة مرتبطة بقيد مستقل. يبقى التصنيف والعميل والقيد الأصلي ثابتين، والمبلغ لا يمكن أن يتجاوز مستحقاته. زيادة الراتب تتم من قسم الموظفين.</div>}</>}
     {request.action === 'إضافة ذمة' && <><label className="field"><span>اسم المستفيد</span><input name="name" required/></label><label className="field"><span>النوع</span><select name="kind"><option>مصور</option><option>مودل</option><option>مورد</option><option>مستقل</option><option>أخرى</option></select></label><label className="field full"><span>العميل — تكلفة مباشرة اختيارية</span><select value={selectedClientId} onChange={event=>setSelectedClientId(event.target.value)}><option value="">ذمة عامة — على الشركة</option>{data.clients.map(row=><option key={row.id} value={row.id}>{row.name}</option>)}</select></label><div className="field-help full">اختيار العميل يجعل الذمة تكلفة مباشرة عليه في «العملاء ← صافي العملاء». لا يتغير المبلغ المستحق على العميل ولا يُسحب شيء من الصندوق قبل الدفع.</div><label className="field"><span>تاريخ القيد</span><input name="createdDate" type="date" defaultValue={today} required/></label><label className="field"><span>تاريخ الاستحقاق</span><input name="due" type="date" defaultValue={today} required/></label></>}
