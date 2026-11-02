@@ -1,13 +1,15 @@
 import type { z } from 'zod'
-import { getAdminCredentialStatus, isAuthorized } from '@/lib/basic-auth'
+import { authenticate } from '@/lib/auth/request'
+import { canEditFinance, canManageUsers } from '@/lib/auth/types'
 
-const AUTH_REALM = 'OZMO Finance'
 const JSON_MEDIA_TYPE = 'application/json'
 const MAX_JSON_BYTES = 100 * 1024
 const unsafeMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
 export type ApiErrorCode =
   | 'AUTHENTICATION_REQUIRED'
+  | 'PERMISSION_DENIED'
+  | 'RATE_LIMITED'
   | 'SERVICE_UNAVAILABLE'
   | 'ORIGIN_FORBIDDEN'
   | 'UNSUPPORTED_MEDIA_TYPE'
@@ -34,26 +36,8 @@ export type ParsedJson<T> =
  * Route handlers must call this even when Proxy already challenged the request.
  * Proxy is a convenience boundary; this function is the handler's auth boundary.
  */
-export function requireApiAuth(request: Request): Response | null {
-  const username = process.env.ADMIN_USERNAME
-  const password = process.env.ADMIN_PASSWORD
-  const credentialStatus = getAdminCredentialStatus(username, password)
-
-  if (credentialStatus !== 'configured' || !username || !password) {
-    if (process.env.NODE_ENV === 'production') {
-      return apiError(503, 'SERVICE_UNAVAILABLE', 'Service is not securely configured.')
-    }
-
-    return null
-  }
-
-  if (isAuthorized(request.headers.get('authorization'), username, password)) {
-    return null
-  }
-
-  return apiError(401, 'AUTHENTICATION_REQUIRED', 'Authentication required.', {
-    'WWW-Authenticate': `Basic realm="${AUTH_REALM}", charset="UTF-8"`,
-  })
+export async function requireApiAuth(request: Request): Promise<Response | null> {
+  return (await authenticate(request)).response ?? null
 }
 
 /** Rejects cross-origin state changes in production. Safe methods are unaffected. */
@@ -76,8 +60,13 @@ export function requireSameOrigin(request: Request): Response | null {
 }
 
 /** Authenticates every request and applies CSRF protection to unsafe methods. */
-export function secureApiRequest(request: Request): Response | null {
-  return requireApiAuth(request) ?? requireSameOrigin(request)
+export async function secureApiRequest(request: Request, ownerOnly = false): Promise<Response | null> {
+  const auth = await authenticate(request)
+  if (auth.response) return auth.response
+  if ((ownerOnly && !canManageUsers(auth.user)) || (unsafeMethods.has(request.method.toUpperCase()) && !canEditFinance(auth.user))) {
+    return apiError(403, 'PERMISSION_DENIED', ownerOnly ? 'إدارة المستخدمين تحتاج إلى صلاحية تعديل.' : 'حسابك للمشاهدة فقط؛ لا يمكنك تعديل البيانات.')
+  }
+  return requireSameOrigin(request)
 }
 
 /**
@@ -146,7 +135,7 @@ export async function parseSecureJsonRequest<Schema extends z.ZodType>(
   request: Request,
   schema: Schema,
 ): Promise<ParsedJson<z.output<Schema>>> {
-  const securityFailure = secureApiRequest(request)
+  const securityFailure = await secureApiRequest(request)
 
   if (securityFailure) {
     return { ok: false, response: securityFailure }

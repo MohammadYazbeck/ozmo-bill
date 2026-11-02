@@ -27,6 +27,8 @@ import {
   SubscriptionStatus,
 } from '@prisma/client'
 import { db } from '@/lib/db'
+import { currentActor, currentActorName } from '@/lib/auth/actor'
+import { creationAuthors } from '@/lib/finance/creation-authors'
 import { buildCashEditHistories, buildLiabilityClientHistories } from '@/lib/finance/edit-history'
 import type {
   AdvanceDto,
@@ -36,6 +38,7 @@ import type {
   ExpenseDto,
   FinanceCommand,
   FinanceSnapshot,
+  FinanceHistory,
   FixedExpenseDto,
   IncomeDto,
   LiabilityDto,
@@ -177,7 +180,7 @@ export async function executeFinanceCommand(command: FinanceCommand): Promise<Fi
             requestId: command.requestId,
             before: result.before,
             after: result.after,
-            metadata: { commandType: command.type, ...(result.metadata ?? {}) },
+            metadata: { commandType: command.type, actorName: currentActorName() ?? requestActor(), ...(result.metadata ?? {}) },
           },
         })
 
@@ -780,7 +783,7 @@ export async function editCashEntry(
     direction: original.direction, kind, occurredOn, amount: decimal(payload.amount),
     currency: payload.currency as CurrencyCode, description, note,
     clientId: clientId ?? undefined, expenseCategoryId: categoryId ?? undefined,
-    historicalRate,
+    historicalRate, createdBy: original.createdBy,
   })
 
   if (original.customerPayment) {
@@ -1451,6 +1454,11 @@ async function payPayroll(
   await applyPayrollAdvanceDeductions(tx, item.id, payload.employeeId, item.advanceDeductionUsd, paidOn)
   await tx.payrollItem.update({ where: { id: item.id }, data: { status: PayrollItemStatus.PAID } })
   await refreshPayrollRunStatus(tx, item.payrollRunId)
+  await tx.auditEvent.create({ data: {
+    organizationId: ORGANIZATION_ID, actor: requestActor(), action: AuditAction.POST,
+    entityType: 'PayrollSettlement', entityId: item.id,
+    metadata: { source: 'payroll-settlement-created', actorName: currentActorName() ?? requestActor() },
+  } })
   return result
 }
 
@@ -2267,13 +2275,13 @@ async function createCorrectionAudit(tx: Tx, input: CorrectionAuditInput) {
       requestId: input.requestId,
       before: input.before,
       after: input.after,
-      metadata: input.metadata,
+      metadata: { actorName: currentActorName() ?? requestActor(), ...(input.metadata ?? {}) },
     },
   })
 }
 
 function requestActor() {
-  return process.env.ADMIN_USERNAME?.trim() || 'local-development'
+  return currentActor() ?? (process.env.ADMIN_USERNAME?.trim() || 'local-development')
 }
 
 async function allocatePaymentFifo(
@@ -2404,6 +2412,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     latestAudit,
     editAudits,
     liabilityLinkAudits,
+    creationAudits,
   ] = await Promise.all([
     tx.client.findMany({
       where: { organizationId: ORGANIZATION_ID, archivedAt: null },
@@ -2470,7 +2479,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       orderBy: [{ dueDate: 'asc' }, { createdAt: 'desc' }],
     }),
     tx.employee.findMany({
-      where: { organizationId: ORGANIZATION_ID, archivedAt: null },
+      where: { organizationId: ORGANIZATION_ID },
       include: {
         compensationHistory: { orderBy: { effectiveFrom: 'desc' } },
         payrollItems: {
@@ -2501,11 +2510,11 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       orderBy: [{ disbursedOn: 'desc' }, { createdAt: 'desc' }],
     }),
     tx.recurringExpenseTemplate.findMany({
-      where: { organizationId: ORGANIZATION_ID, archivedAt: null },
+      where: { organizationId: ORGANIZATION_ID },
       include: {
         expenseCategory: { select: { name: true } },
         occurrences: {
-          where: { status: { in: [PayableStatus.DUE, PayableStatus.PARTIALLY_PAID] } },
+          where: { status: { not: PayableStatus.WAIVED } },
           include: {
             payments: {
               where: { cashEntry: { status: CashEntryStatus.POSTED } },
@@ -2518,7 +2527,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       orderBy: { name: 'asc' },
     }),
     tx.serviceSubscription.findMany({
-      where: { organizationId: ORGANIZATION_ID, archivedAt: null },
+      where: { organizationId: ORGANIZATION_ID },
       include: {
         expenseCategory: { select: { name: true } },
         charges: {
@@ -2567,7 +2576,20 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
       select: { id: true, entityId: true, actor: true, occurredAt: true, before: true, after: true, metadata: true },
     }),
+    tx.auditEvent.findMany({
+      where: { organizationId: ORGANIZATION_ID, action: { in: [AuditAction.CREATE, AuditAction.POST] }, entityType: { in: ['Client', 'Subscription', 'Liability', 'Employee', 'Advance', 'RecurringExpenseTemplate', 'ServiceSubscription', 'PayrollItem', 'PayrollSettlement', 'AdvanceRepayment', 'CashEntry'] } },
+      orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],
+      select: { entityType: true, entityId: true, actor: true, metadata: true },
+    }),
   ])
+  const createdBy = creationAuthors(creationAudits)
+  for (const entry of cashEntries) {
+    if (entry.createdBy) createdBy[`CashEntry:${entry.id}`] = entry.createdBy
+  }
+  for (const repayment of payrollAdvanceRepayments) {
+    const author = repayment.payrollItemId ? createdBy[`PayrollSettlement:${repayment.payrollItemId}`] : undefined
+    if (author) createdBy[`CashEntry:${repayment.id}`] = author
+  }
   const editHistories = buildCashEditHistories(editAudits)
   const liabilityLinkHistories = buildLiabilityClientHistories(liabilityLinkAudits)
 
@@ -2714,7 +2736,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     due: dateText(liability.dueDate),
   }))
 
-  const employeeDtos: EmployeeDto[] = employees.map(employee => {
+  const employeeDtos: EmployeeDto[] = employees.filter(employee => !employee.archivedAt).map(employee => {
     const unpaidItems = employee.payrollItems.filter(item => (
       item.status === PayrollItemStatus.READY || item.status === PayrollItemStatus.PARTIALLY_PAID
     ))
@@ -2756,13 +2778,14 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
     ...(advance.employeeId ? { employeeId: advance.employeeId } : {}),
   }))
 
-  const fixedExpenseDtos: FixedExpenseDto[] = fixedExpenses.map(template => {
+  const fixedExpenseDtos: FixedExpenseDto[] = fixedExpenses.filter(template => !template.archivedAt).map(template => {
     const expected = toUsd(
       template.amountOriginal,
       template.currency,
       template.currency === CurrencyCode.USD ? ONE : context.exchangeRate,
     )
-    const balances = template.occurrences.map(item => Prisma.Decimal.max(
+    const unpaidOccurrences = template.occurrences.filter(item => item.status === PayableStatus.DUE || item.status === PayableStatus.PARTIALLY_PAID)
+    const balances = unpaidOccurrences.map(item => Prisma.Decimal.max(
       item.expectedUsd.minus(sumDecimal(item.payments.map(payment => payment.appliedAmountUsd))),
       ZERO,
     ))
@@ -2773,13 +2796,14 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       category: template.expenseCategory.name,
       amount: money(expected),
       payable: money(balances[0] ?? ZERO),
+      ...(unpaidOccurrences[0] ? { payablePeriod: dateText(unpaidOccurrences[0].periodStart).slice(0, 7) } : {}),
       outstanding: money(outstanding),
       dueDay: template.dueDay,
       status: outstanding.gt(ZERO) ? 'مستحق' : 'مدفوع',
     }
   })
 
-  const serviceDtos: ServiceDto[] = services.map(service => {
+  const serviceDtos: ServiceDto[] = services.filter(service => !service.archivedAt).map(service => {
     const expected = toUsd(
       service.amountOriginal,
       service.currency,
@@ -2793,6 +2817,9 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       return balance.gt(ZERO) ? [balance] : []
     })
     const outstanding = sumDecimal(openCharges)
+    const oldestOpenCharge = service.charges.find(item => (
+      item.status !== PayableStatus.WAIVED && item.expectedUsd.gt(sumDecimal(item.payments.map(payment => payment.appliedAmountUsd)))
+    ))
     const lastCharge = service.charges.at(-1)
     return {
       id: service.id,
@@ -2800,6 +2827,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
       category: service.expenseCategory.name,
       amount: money(expected),
       payable: money(openCharges[0] ?? ZERO),
+      ...(oldestOpenCharge ? { payablePeriod: dateText(oldestOpenCharge.dueDate).slice(0, 7) } : {}),
       outstanding: money(outstanding),
       cycle: billingCycleLabel(service.billingCycle),
       next: service.nextRenewalDate
@@ -2857,8 +2885,8 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
         ...item.payments.map(payment => payment.paidOn),
         ...item.advanceRepayments.map(repayment => repayment.repaidOn),
       ].sort((left, right) => right.getTime() - left.getTime())
-      const reversible = item.status === PayrollItemStatus.PAID
-        || item.status === PayrollItemStatus.PARTIALLY_PAID
+      const reversible = !employee.archivedAt && (item.status === PayrollItemStatus.PAID
+        || item.status === PayrollItemStatus.PARTIALLY_PAID)
 
       return {
         payrollItemId: item.id,
@@ -2886,8 +2914,47 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
   }
   const totalUsd = cashUsd.plus(cashSyp.div(context.exchangeRate))
 
+  // Read-only period facts: selecting a month never generates historical periods,
+  // changes applications or changes the live objects used by payment commands.
+  const history: FinanceHistory = {
+    invoices: clients.flatMap(client => client.invoices.map(invoice => {
+      const paid = sumDecimal(invoice.allocations.map(allocation => allocation.amountUsd))
+      return {
+        id: invoice.id, clientId: client.id,
+        ...(invoice.subscriptionId ? { subscriptionId: invoice.subscriptionId } : {}),
+        period: dateText(invoice.periodStart).slice(0, 7), number: invoice.number,
+        issueDate: dateText(invoice.issueDate), dueDate: dateText(invoice.dueDate),
+        subtotal: money(invoice.subtotalUsd), total: money(invoice.totalUsd), paid: money(paid),
+        remaining: money(Prisma.Decimal.max(invoice.totalUsd.minus(paid), ZERO)),
+        subscriptionAmount: money(sumDecimal(invoice.lines.filter(line => line.type === InvoiceLineType.SUBSCRIPTION).map(line => line.lineTotalUsd))),
+        openingBalance: money(invoice.openingBalanceSnapshotUsd),
+        lines: invoice.lines.map(line => ({ description: line.description, quantity: money(line.quantity), unitAmount: money(line.unitAmountUsd), total: money(line.lineTotalUsd) })),
+      }
+    })),
+    payroll: employees.flatMap(employee => employee.payrollItems.map(item => ({
+      id: item.id, employeeId: employee.id, period: dateText(item.payrollRun.periodStart).slice(0, 7),
+      employeeName: employee.name, archived: Boolean(employee.archivedAt),
+      base: money(item.baseSalaryUsd), bonus: money(item.bonusUsd), deductions: money(item.deductionUsd),
+      loan: money(item.advanceDeductionUsd), net: money(item.netPayUsd), status: item.status,
+    }))),
+    fixedExpenses: fixedExpenses.flatMap(template => template.occurrences.map(item => ({
+      id: item.id, parentId: template.id, period: dateText(item.periodStart).slice(0, 7),
+      name: template.name, category: template.expenseCategory.name, dueDay: template.dueDay, archived: Boolean(template.archivedAt),
+      dueDate: dateText(item.dueDate), amount: money(item.expectedUsd),
+      paid: money(sumDecimal(item.payments.map(payment => payment.appliedAmountUsd))),
+    }))),
+    services: services.flatMap(service => service.charges.filter(item => item.status !== PayableStatus.WAIVED).map(item => ({
+      id: item.id, parentId: service.id, period: dateText(item.dueDate).slice(0, 7),
+      name: service.name, category: service.expenseCategory.name, cycle: billingCycleLabel(service.billingCycle), archived: Boolean(service.archivedAt),
+      dueDate: dateText(item.dueDate), amount: money(item.expectedUsd),
+      paid: money(sumDecimal(item.payments.map(payment => payment.appliedAmountUsd))),
+    }))),
+  }
+
   const generatedAt = new Date().toISOString()
   return {
+    businessMonth: context.todayText.slice(0, 7), history,
+    createdBy,
     clients: clientDtos,
     incomes: incomeDtos,
     expenses: expenseDtos,
@@ -2906,6 +2973,7 @@ async function buildSnapshot(tx: Tx, context: PeriodContext): Promise<FinanceSna
 }
 
 type CashEntryInput = {
+  createdBy?: string | null
   direction: CashDirection
   kind: CashEntryKind
   occurredOn: Date
@@ -2963,7 +3031,7 @@ async function createCashEntry(tx: Tx, context: PeriodContext, input: CashEntryI
       amountUsd,
       description: input.description,
       note: input.note,
-      createdBy: requestActor(),
+      createdBy: input.createdBy !== undefined ? input.createdBy : (currentActorName() ?? requestActor()),
     },
   })
 }
@@ -2997,7 +3065,7 @@ async function createCompensatingCashEntry(
       description: `Reversal: ${original.description}`.slice(0, 250),
       note: reason,
       reversalOfId: original.id,
-      createdBy: requestActor(),
+      createdBy: currentActorName() ?? requestActor(),
     },
   })
   const updated = await tx.cashEntry.updateMany({

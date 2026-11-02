@@ -12,6 +12,11 @@ const event = (entityId: string, previousCashEntryId: string, amount: string) =>
 })
 
 describe('persistent edit history', () => {
+  it('shows the authenticated display name snapshot while retaining historical username fallback', () => {
+    const audit = event('second', 'first', '150')
+    expect(buildCashEditHistories([{ ...audit, metadata: { ...audit.metadata, actorName: 'غيث' } }]).get('second')?.[0].actor).toBe('غيث')
+    expect(buildCashEditHistories([audit]).get('second')?.[0].actor).toBe('المالك')
+  })
   it('keeps previous edits when replacement IDs change', () => {
     const histories = buildCashEditHistories([event('third', 'second', '200'), event('second', 'first', '150')])
     expect(histories.get('third')?.map(item => item.id)).toEqual(['audit-third', 'audit-second'])

@@ -163,6 +163,7 @@ export type LiabilityDto = Omit<LiabilityRecord, 'total' | 'paid'> & {
 }
 
 export type EmployeeDto = Omit<EmployeeRecord, 'base' | 'bonus' | 'deductions' | 'loan'> & {
+  archived?: boolean
   base: MoneyString
   bonus: MoneyString
   deductions: MoneyString
@@ -180,12 +181,16 @@ export type AdvanceDto = Omit<AdvanceRecord, 'amount' | 'paid'> & {
 }
 
 export type FixedExpenseDto = Omit<FixedExpenseRecord, 'amount'> & {
+  archived?: boolean
+  payablePeriod?: string
   amount: MoneyString
   payable: MoneyString
   outstanding: MoneyString
 }
 
 export type ServiceDto = Omit<ServiceRecord, 'amount'> & {
+  archived?: boolean
+  payablePeriod?: string
   amount: MoneyString
   payable: MoneyString
   outstanding: MoneyString
@@ -227,8 +232,63 @@ export type PayrollSettlementDto = {
   reversible: boolean
 }
 
+export type InvoicePeriodDto = {
+  id: string
+  clientId: string
+  subscriptionId?: string
+  period: string
+  number: string
+  issueDate: string
+  dueDate: string
+  subtotal: MoneyString
+  total: MoneyString
+  paid: MoneyString
+  remaining: MoneyString
+  subscriptionAmount: MoneyString
+  openingBalance: MoneyString
+  lines: InvoiceLineDto[]
+}
+
+export type PayrollPeriodDto = {
+  id: string
+  employeeId: string
+  employeeName: string
+  archived?: boolean
+  period: string
+  base: MoneyString
+  bonus: MoneyString
+  deductions: MoneyString
+  loan: MoneyString
+  net: MoneyString
+  status: PayrollSettlementDto['status']
+}
+
+export type PayablePeriodDto = {
+  id: string
+  parentId: string
+  name: string
+  category: string
+  archived?: boolean
+  dueDay?: number
+  cycle?: string
+  period: string
+  dueDate: string
+  amount: MoneyString
+  paid: MoneyString
+}
+
+export type FinanceHistory = {
+  invoices: InvoicePeriodDto[]
+  payroll: PayrollPeriodDto[]
+  fixedExpenses: PayablePeriodDto[]
+  services: PayablePeriodDto[]
+}
+
 /** Database bootstrap payload; money remains decimal text across the JSON boundary. */
 export type FinanceSnapshot = {
+  businessMonth?: string
+  history?: FinanceHistory
+  createdBy?: Record<string, string>
   clients: ClientDto[]
   incomes: IncomeDto[]
   expenses: ExpenseDto[]

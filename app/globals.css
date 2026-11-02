@@ -20,6 +20,7 @@ html { background: var(--canvas); }
 body { margin: 0; color: var(--ink); background: var(--canvas); font-family: Tahoma, Arial, sans-serif; font-size: 14px; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
+.entry-author { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; font-weight: 400; line-height: 1.5; }
 
 .app-shell { min-height: 100vh; }
 .sidebar {
@@ -64,6 +65,10 @@ button { cursor: pointer; }
 .toolbar { min-height: 78px; display: flex; gap: 12px; align-items: flex-end; padding: 15px; margin-bottom: 18px; background: #fff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 2px 5px #2d241e08; }
 .toolbar label { display: grid; gap: 6px; min-width: 155px; }
 .toolbar label span, .field span { font-size: 10px; font-weight: 700; color: var(--muted); }
+.period-toolbar { align-items: center; flex-wrap: wrap; }
+.period-help { flex: 1 1 280px; display: grid; gap: 5px; line-height: 1.6; }
+.period-help b { font-size: 12px; }
+.period-help small { color: var(--muted); font-size: 10px; }
 .toolbar input, .toolbar select, .search, .field input, .field select { min-height: 39px; padding: 0 11px; border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink); outline: none; }
 .toolbar input:focus, .toolbar select:focus, .search:focus, .field input:focus { border-color: var(--orange); box-shadow: 0 0 0 3px #ff5a0a13; }
 .notice { margin: -10px 0 16px; padding: 11px 14px; border-radius: 7px; background: #edf9f4; color: #086346; border: 1px solid #b9e9d7; }
@@ -73,6 +78,9 @@ button { cursor: pointer; }
 .kpi-grid.five { grid-template-columns: repeat(5, 1fr); }
 .kpi-grid.four { grid-template-columns: repeat(4, 1fr); }
 .kpi-grid.three { grid-template-columns: repeat(3, 1fr); }
+.income-summary { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+.income-summary .kpi strong { font-size: clamp(20px, 2.2vw, 28px); overflow-wrap: anywhere; }
+.income-empty { padding: 20px; text-align: center; color: var(--muted); }
 .kpi { min-width: 0; min-height: 125px; padding: 17px; border-radius: 9px; background: #fff; border: 1px solid var(--line); border-top: 3px solid #25211f; box-shadow: 0 2px 6px #2d241e08; display: flex; flex-direction: column; }
 .kpi.orange { border-top-color: var(--orange); }
 .kpi.green { border-top-color: var(--green); }

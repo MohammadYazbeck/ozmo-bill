@@ -34,22 +34,26 @@ export function getAdminCredentialStatus(
 }
 
 export function isAuthorized(header: string | null, username: string, password: string) {
-  const match = header?.match(/^Basic\s+(.+)$/i)
+  const credentials = parseBasicCredentials(header)
+  if (!credentials) return false
+  const usernameMatches = safeEqual(credentials.username, username)
+  const passwordMatches = safeEqual(credentials.password, password)
+  return usernameMatches && passwordMatches
+}
 
-  if (!match) return false
+export function parseBasicCredentials(header: string | null) {
+  if (!header || header.length > 4096) return null
+  const match = header?.match(/^Basic\s+(.+)$/i)
+  if (!match) return null
 
   const decoded = decodeBasicAuth(match[1])
 
-  if (!decoded) return false
+  if (!decoded) return null
 
   const separator = decoded.indexOf(':')
 
-  if (separator < 0) return false
-
-  const usernameMatches = safeEqual(decoded.slice(0, separator), username)
-  const passwordMatches = safeEqual(decoded.slice(separator + 1), password)
-
-  return usernameMatches && passwordMatches
+  if (separator < 1) return null
+  return { username: decoded.slice(0, separator), password: decoded.slice(separator + 1) }
 }
 
 function decodeBasicAuth(value: string) {

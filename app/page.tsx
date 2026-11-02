@@ -2,6 +2,13 @@
 
 import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import Image from 'next/image'
+import type { ComponentProps } from 'react'
+import { UsersPanel } from './components/users-panel'
+import { IncomeSummary, IncomeBreakdown } from './components/income-analysis'
+import { analyzeIncome, filterIncomeRows } from '@/lib/finance/income-analysis'
+import { PeriodSelector } from './components/period-selector'
+import { cashPeriodBalances, payrollEmployee, payrollPeriodTotals, selectFinancePeriod, subscriptionPeriodRows, type ReportPeriod } from '@/lib/finance/period-view'
+import { canEditFinance, canManageUsers, roleLabel, type Principal } from '@/lib/auth/types'
 import { downloadInvoiceXlsx } from './invoice'
 import { CashEditHistory } from './components/cash-edit-history'
 import { decimalToUnits, unitsToDecimal } from '@/lib/finance/accounting'
@@ -37,6 +44,7 @@ type View =
   | 'cashbox'
   | 'reports'
   | 'settings'
+  | 'users'
 
 type IconName = 'grid' | 'repeat' | 'users' | 'in' | 'out' | 'briefcase' | 'wallet' | 'safe' | 'chart' | 'gear'
 
@@ -52,11 +60,20 @@ const navigation: { id: View; label: string; icon: IconName }[] = [
   { id: 'cashbox', label: 'الصندوق', icon: 'safe' },
   { id: 'reports', label: 'التقارير', icon: 'chart' },
   { id: 'settings', label: 'الإعدادات', icon: 'gear' },
+  { id: 'users', label: 'المستخدمون', icon: 'users' },
 ]
 
 type FinanceContextValue = {
   data: FinanceSnapshot
+  rawData: FinanceSnapshot
+  reportPeriod: ReportPeriod
+  setReportPeriod: (period: ReportPeriod) => void
+  periodEnabled: boolean
+  periodNote: string
+  businessMonth: string
+  historical: boolean
   mutating: boolean
+  canEdit: boolean
   mutationError: string
   refresh: () => Promise<void>
   runCommand: (command: FinanceCommandInput) => Promise<void>
@@ -68,6 +85,18 @@ function useFinance() {
   const value = useContext(FinanceContext)
   if (!value) throw new Error('Finance context is unavailable')
   return value
+}
+
+function WriteButton({ currentOnly = false, ...props }: ComponentProps<'button'> & { currentOnly?: boolean }) {
+  const context = useContext(FinanceContext)
+  const historical = currentOnly && context?.historical
+  return context?.canEdit ? <button {...props} disabled={props.disabled || historical} title={historical ? 'لتعديل البيانات الحالية اختر كل الأشهر أو الشهر الحالي.' : props.title}/> : null
+}
+
+function EnteredBy({ entity, id }: { entity: string; id?: string }) {
+  const context = useContext(FinanceContext)
+  const author = id ? context?.data.createdBy?.[`${entity}:${id}`] : undefined
+  return author ? <small className="entry-author">تم الإدخال بواسطة {author}</small> : null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -343,7 +372,8 @@ function Receivables() {
 }
 
 function PageHead({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: string }) {
-  return <header className="page-head"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action && <button className="btn primary plus" onClick={() => openAction(action)}>+ {action}</button>}</header>
+  const context = useContext(FinanceContext)
+  return <><header className="page-head"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{description}</p></div>{action && <WriteButton className="btn primary plus" onClick={() => openAction(action)}>+ {action}</WriteButton>}</header>{context?.periodEnabled && <PeriodSelector period={context.reportPeriod} businessMonth={context.businessMonth} note={context.periodNote} onChange={context.setReportPeriod}/>}</>
 }
 
 function PanelTitle({ title, meta }: { title: string; meta?: string }) {
@@ -490,13 +520,13 @@ function localTotals(data: FinanceSnapshot) {
 }
 
 function LocalDashboard({ changeView }: { changeView: (view: View) => void }) {
-  const { data } = useFinance()
+  const { data, canEdit } = useFinance()
   const totals = localTotals(data)
   const debtors = data.clients.filter(client => decimal(client.due) > 0)
   return <>
     <PageHead eyebrow="منظومة الإدارة المالية" title="مرحبًا بك في OZMO Finance" description="البيانات محفوظة في قاعدة البيانات ومحدّثة لحظيًا." />
-    <section className="kpi-grid four"><Kpi label="إجمالي الدخل" value={money(totals.income)} sub={`${data.incomes.length} حركة`} tone="green"/><Kpi label="إجمالي المصروف" value={money(totals.expense)} sub={`${data.expenses.length} حركة`} tone="red"/><Kpi label="صافي الربح" value={money(totals.profit)} sub="الدخل ناقص المصروف" tone="orange"/><Kpi label="المطلوب تحصيله" value={money(totals.receivables)} sub={`${debtors.length} عملاء`}/></section>
-    <section className="panel"><PanelTitle title="ابدأ من هنا" meta="خطوات بسيطة"/><div className="quick-actions"><button onClick={() => changeView('clients')}><b>1</b><span>إضافة عميل</span><small>أنشئ ملف العميل أولًا</small></button><button onClick={() => changeView('subscriptions')}><b>2</b><span>إنشاء اشتراك</span><small>حدد الباقة والقيمة الشهرية</small></button><button onClick={() => changeView('income')}><b>3</b><span>تسجيل دخل</span><small>دفعة اشتراك أو دخل آخر</small></button><button onClick={() => changeView('reports')}><b>4</b><span>عرض التقارير</span><small>تُحسب من بياناتك تلقائيًا</small></button></div></section>
+    <section className="kpi-grid four"><Kpi label="إجمالي الدخل" value={money(totals.income)} sub={`${data.incomes.length} حركة`} tone="green"/><Kpi label="إجمالي المصروف" value={money(totals.expense)} sub={`${data.expenses.length} حركة`} tone="red"/><Kpi label="صافي الربح" value={money(totals.profit)} sub="الدخل ناقص المصروف" tone="orange"/><Kpi label="المطلوب تحصيله" value={money(totals.receivables)} sub={`${debtors.length} عملاء — رصيد متراكم حالي`}/></section>
+    <section className="panel"><PanelTitle title="ابدأ من هنا" meta="خطوات بسيطة"/><div className="quick-actions"><button onClick={() => changeView('clients')}><b>1</b><span>{canEdit ? 'إضافة عميل' : 'عرض العملاء'}</span><small>{canEdit ? 'أنشئ ملف العميل أولًا' : 'اطّلع على بيانات العملاء'}</small></button><button onClick={() => changeView('subscriptions')}><b>2</b><span>{canEdit ? 'إنشاء اشتراك' : 'عرض الاشتراكات'}</span><small>{canEdit ? 'حدد الباقة والقيمة الشهرية' : 'تابع الدفعات والأرصدة'}</small></button><button onClick={() => changeView('income')}><b>3</b><span>{canEdit ? 'تسجيل دخل' : 'عرض الدخل'}</span><small>دفعة اشتراك أو دخل آخر</small></button><button onClick={() => changeView('reports')}><b>4</b><span>عرض التقارير</span><small>تُحسب من بياناتك تلقائيًا</small></button></div></section>
     <LocalReceivables/>
   </>
 }
@@ -504,13 +534,13 @@ function LocalDashboard({ changeView }: { changeView: (view: View) => void }) {
 function LocalReceivables() {
   const { data } = useFinance()
   const rows = data.clients.filter(client => decimal(client.due) > 0)
-  return <section className="panel table-panel"><PanelTitle title="المبالغ المتبقية على العملاء" meta={`${rows.length} عملاء`}/><div className="table-scroll"><table><thead><tr><th>العميل</th><th>قيمة الاشتراك</th><th>المدفوع</th><th>المتبقي</th><th>الحالة</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={5}/> : rows.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{money(row.monthly)}</td><td className="positive">{money(row.paid)}</td><td className="negative strong">{money(row.due)}</td><td><Status tone={row.status === 'متأخر' ? 'bad' : 'warn'}>{row.status}</Status></td></tr>)}</tbody></table></div></section>
+  return <section className="panel table-panel"><PanelTitle title="المبالغ المتبقية على العملاء" meta={`${rows.length} عملاء — رصيد حالي متراكم`}/><div className="table-scroll"><table><thead><tr><th>العميل</th><th>قيمة الاشتراك</th><th>المدفوع</th><th>المتبقي</th><th>الحالة</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={5}/> : rows.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{money(row.monthly)}</td><td className="positive">{money(row.paid)}</td><td className="negative strong">{money(row.due)}</td><td><Status tone={row.status === 'متأخر' ? 'bad' : 'warn'}>{row.status}</Status></td></tr>)}</tbody></table></div></section>
 }
 
 function LocalSubscriptions() {
-  const { data, runCommand, mutating } = useFinance()
+  const { data, rawData, reportPeriod, runCommand, mutating } = useFinance()
   const [search, setSearch] = useState('')
-  const rows = data.clients.filter(client => decimal(client.monthly) > 0 && client.name.includes(search))
+  const rows = subscriptionPeriodRows(rawData, reportPeriod).filter(client => (reportPeriod !== 'all' || decimal(client.monthly) > 0) && client.name.includes(search))
   const value = rows.reduce((sum, row) => sum + decimal(row.monthly), 0)
   const due = rows.reduce((sum, row) => sum + decimal(row.due), 0)
   const archive = async (row: ClientDto) => {
@@ -541,7 +571,7 @@ function LocalSubscriptions() {
       total: decimal(lineItem.total),
     })),
   }, index)
-  return <><PageHead eyebrow="إدارة الإيراد المتكرر" title="الاشتراكات الشهرية" description="العقود الشهرية والتحصيل والرصيد المتبقي لكل عميل." action="اشتراك جديد"/><div className="summary-strip"><span><b>{rows.length}</b> اشتراكًا</span><span><b>{money(value)}</b> قيمة شهرية</span><span className="danger-text"><b>{money(due)}</b> متبقي للتحصيل</span></div><section className="panel table-panel"><div className="list-tools"><div><h2>حسابات الاشتراكات</h2><span>{rows.length} سجل</span></div><input className="search" placeholder="ابحث باسم العميل…" value={search} onChange={event => setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>العميل</th><th>الباقة</th><th>القيمة الشهرية</th><th>المدفوع</th><th>المتبقي</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={7} text={data.clients.length ? 'لا توجد اشتراكات. اضغط «اشتراك جديد» للبدء.' : 'أضف عميلًا أولًا، ثم أنشئ له اشتراكًا.'}/> : rows.map((row, index) => <tr key={row.id}><td className="strong">{row.name}</td><td>{row.package}</td><td>{money(row.monthly)}</td><td className="positive">{money(row.paid)}</td><td className={decimal(row.due) ? 'negative strong' : ''}>{money(row.due)}</td><td><Status tone={receivableStatusTone(row.status)}>{row.status}</Status></td><td><div className="row-actions"><button className="table-action" disabled={mutating} onClick={() => openAction('تسجيل دفعة اشتراك', row.name, row.id)}>دفعة</button><button className="table-action" disabled={mutating || !row.subscriptionId} onClick={() => openAction('تعديل اشتراك', row.name, row.subscriptionId)}>تعديل</button><button className="table-action primary-action" disabled={!row.currentInvoiceId} onClick={() => void exportInvoice(row, index)}>Excel</button><button className="table-action danger-action" disabled={mutating || !row.subscriptionId} onClick={() => void archive(row).catch(() => undefined)}>أرشفة</button></div></td></tr>)}</tbody></table></div></section></>
+  return <><PageHead eyebrow="إدارة الإيراد المتكرر" title="الاشتراكات الشهرية" description="العقود الشهرية والتحصيل والرصيد المتبقي لكل عميل." action="اشتراك جديد"/><div className="summary-strip"><span><b>{rows.length}</b> اشتراكًا</span><span><b>{money(value)}</b> قيمة شهرية</span><span className="danger-text"><b>{money(due)}</b> {reportPeriod === 'all' ? 'متبقي للتحصيل' : 'متبقي فواتير الشهر'}</span></div><section className="panel table-panel"><div className="list-tools"><div><h2>حسابات الاشتراكات</h2><span>{rows.length} سجل</span></div><input className="search" placeholder="ابحث باسم العميل…" value={search} onChange={event => setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>العميل</th><th>الباقة</th><th>القيمة الشهرية</th><th>{reportPeriod === 'all' ? 'المدفوع' : 'مدفوع الفاتورة حاليًا'}</th><th>{reportPeriod === 'all' ? 'المتبقي' : 'متبقي الفاتورة'}</th>{reportPeriod !== 'all' && <th>إجمالي متبقي العميل</th>}<th>الحالة</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={reportPeriod === 'all' ? 7 : 8} text={data.clients.length ? 'لا توجد اشتراكات. اضغط «اشتراك جديد» للبدء.' : 'أضف عميلًا أولًا، ثم أنشئ له اشتراكًا.'}/> : rows.map((row, index) => <tr key={`${row.id}:${row.currentInvoiceId ?? row.subscriptionId ?? ''}`}><td className="strong">{row.name}<EnteredBy entity="Subscription" id={row.subscriptionId}/></td><td>{row.package}</td><td>{money(row.monthly)}</td><td className="positive">{money(row.paid)}</td><td className={decimal(row.due) ? 'negative strong' : ''}>{money(row.due)}</td>{reportPeriod !== 'all' && <td className="negative">{money(rawData.clients.find(client => client.id === row.id)?.due ?? '0')}</td>}<td><Status tone={receivableStatusTone(row.status)}>{row.status}</Status></td><td><div className="row-actions"><WriteButton className="table-action" disabled={mutating} onClick={() => openAction('تسجيل دفعة اشتراك', row.name, row.id)}>دفعة</WriteButton><WriteButton currentOnly className="table-action" disabled={mutating || !row.subscriptionId || rawData.clients.find(client => client.id === row.id)?.subscriptionId !== row.subscriptionId} onClick={() => openAction('تعديل اشتراك', row.name, row.subscriptionId)}>تعديل</WriteButton><button className="table-action primary-action" disabled={!row.currentInvoiceId} onClick={() => void exportInvoice(row, index)}>Excel</button><WriteButton currentOnly className="table-action danger-action" disabled={mutating || !row.subscriptionId || rawData.clients.find(client => client.id === row.id)?.subscriptionId !== row.subscriptionId} onClick={() => void archive(row).catch(() => undefined)}>أرشفة</WriteButton></div></td></tr>)}</tbody></table></div></section></>
 }
 
 function LocalClients() {
@@ -559,7 +589,7 @@ function LocalClients() {
     if (!window.confirm(`تعطيل العميل ${row.name}؟ لن تُحذف أي حركة أو فاتورة أو بيانات مالية مرتبطة به.`)) return
     await runCommand({ type: 'client.setActive', requestId: crypto.randomUUID(), payload: { clientId: row.id, active } })
   }
-  return <><PageHead eyebrow="دليل العملاء" title="العملاء" description="بيانات العملاء والاشتراكات والنتيجة المالية لكل عميل." action="عميل جديد"/><section className="panel table-panel"><div className="list-tools"><div><h2>قائمة العملاء</h2><span>{clients.length} من {data.clients.length}</span></div><input className="search" placeholder="ابحث بالاسم أو الهاتف أو الخدمة…" value={search} onChange={event=>setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>اسم العميل</th><th>الهاتف</th><th>الخدمة</th><th>قيمة العقد</th><th>الرصيد</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{clients.length === 0 ? <EmptyTableRow columns={7}/> : clients.map(row => <tr key={row.id}><td className="strong client-name"><span>{row.name.slice(0,1)}</span>{row.name}</td><td dir="ltr">{row.phone || '—'}</td><td>{row.package || 'لا يوجد اشتراك'}</td><td>{money(row.monthly)}</td><td className={decimal(row.due) ? 'negative strong' : 'positive'}>{money(row.due)}</td><td><Status tone={row.active ? 'good' : 'neutral'}>{row.active ? 'فعال' : 'غير فعال'}</Status></td><td><div className="row-actions"><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل عميل', row.name, row.id)}>تعديل</button>{row.active ? <button className="table-action danger-action" disabled={mutating} onClick={()=>void setActive(row, false).catch(() => undefined)}>تعطيل</button> : <button className="table-action primary-action" disabled={mutating} onClick={()=>void runCommand({ type: 'client.setActive', requestId: crypto.randomUUID(), payload: { clientId: row.id, active: true } }).catch(() => undefined)}>إعادة تفعيل</button>}</div></td></tr>)}</tbody></table></div></section><section className="panel table-panel"><PanelTitle title="صافي العملاء" meta="الدخل − المصروفات − الذمم المفتوحة"/><div className="table-scroll"><table><thead><tr><th>العميل</th><th>الدخل</th><th>المصروفات المرتبطة</th><th>الذمم المفتوحة</th><th>إجمالي التكاليف المباشرة</th><th>الصافي المتوقع</th></tr></thead><tbody>{profitability.length === 0 ? <EmptyTableRow columns={6}/> : profitability.map(row => { const net = row.revenue - row.directCosts; return <tr key={row.client.id}><td className="strong">{row.client.name}</td><td className="positive">{money(row.revenue)}</td><td className="negative">-{money(row.paidExpenses)}</td><td className="negative">-{money(row.openLiabilities)}</td><td className="negative strong">-{money(row.directCosts)}</td><td className={net >= 0 ? 'positive strong' : 'negative strong'}>{money(net)}</td></tr>})}</tbody></table></div></section></>
+  return <><PageHead eyebrow="دليل العملاء" title="العملاء" description="بيانات العملاء والاشتراكات والنتيجة المالية لكل عميل." action="عميل جديد"/><section className="panel table-panel"><div className="list-tools"><div><h2>قائمة العملاء</h2><span>{clients.length} من {data.clients.length}</span></div><input className="search" placeholder="ابحث بالاسم أو الهاتف أو الخدمة…" value={search} onChange={event=>setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>اسم العميل</th><th>الهاتف</th><th>الخدمة</th><th>قيمة العقد</th><th>الرصيد</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{clients.length === 0 ? <EmptyTableRow columns={7}/> : clients.map(row => <tr key={row.id}><td className="strong client-name"><span>{row.name.slice(0,1)}</span>{row.name}<EnteredBy entity="Client" id={row.id}/></td><td dir="ltr">{row.phone || '—'}</td><td>{row.package || 'لا يوجد اشتراك'}</td><td>{money(row.monthly)}</td><td className={decimal(row.due) ? 'negative strong' : 'positive'}>{money(row.due)}</td><td><Status tone={row.active ? 'good' : 'neutral'}>{row.active ? 'فعال' : 'غير فعال'}</Status></td><td><div className="row-actions"><WriteButton className="table-action" disabled={mutating} onClick={()=>openAction('تعديل عميل', row.name, row.id)}>تعديل</WriteButton>{row.active ? <WriteButton className="table-action danger-action" disabled={mutating} onClick={()=>void setActive(row, false).catch(() => undefined)}>تعطيل</WriteButton> : <WriteButton className="table-action primary-action" disabled={mutating} onClick={()=>void runCommand({ type: 'client.setActive', requestId: crypto.randomUUID(), payload: { clientId: row.id, active: true } }).catch(() => undefined)}>إعادة تفعيل</WriteButton>}</div></td></tr>)}</tbody></table></div></section><section className="panel table-panel"><PanelTitle title="صافي العملاء" meta="الدخل − المصروفات − الذمم المفتوحة"/><div className="table-scroll"><table><thead><tr><th>العميل</th><th>الدخل</th><th>المصروفات المرتبطة</th><th>الذمم المفتوحة</th><th>إجمالي التكاليف المباشرة</th><th>الصافي المتوقع</th></tr></thead><tbody>{profitability.length === 0 ? <EmptyTableRow columns={6}/> : profitability.map(row => { const net = row.revenue - row.directCosts; return <tr key={row.client.id}><td className="strong">{row.client.name}</td><td className="positive">{money(row.revenue)}</td><td className="negative">-{money(row.paidExpenses)}</td><td className="negative">-{money(row.openLiabilities)}</td><td className="negative strong">-{money(row.directCosts)}</td><td className={net >= 0 ? 'positive strong' : 'negative strong'}>{money(net)}</td></tr>})}</tbody></table></div></section></>
 }
 
 function originalMoney(amount: string | number, currency: Currency) {
@@ -570,9 +600,9 @@ function LocalIncome() {
   const { data, mutating } = useFinance()
   const [search, setSearch] = useState('')
   const [type, setType] = useState('الكل')
-  const query = search.trim().toLocaleLowerCase('ar')
-  const rows = data.incomes.filter(row => (type === 'الكل' || incomeFormType(row.type) === type) && `${row.date} ${row.source} ${row.client ?? ''} ${row.type} ${row.note}`.toLocaleLowerCase('ar').includes(query))
-  return <><PageHead eyebrow="حركة الصندوق الداخلة" title="الدخل" description="دفعة الاشتراك تُخصم تلقائيًا من الرصيد المتبقي للعميل. التعديلات محفوظة تحت كل حركة." action="تسجيل دخل"/><section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات الدخل</h2><span>{rows.length} من {data.incomes.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالمصدر أو العميل أو البيان أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/><select value={type} onChange={event=>setType(event.target.value)}><option>الكل</option><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select>{(search || type !== 'الكل') && <button className="btn ghost" onClick={()=>{setSearch('');setType('الكل')}}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>المصدر</th><th>النوع</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={7} text={data.incomes.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات دخل بعد.'}/> : rows.map(row => <Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.source}</td><td>{row.type}</td><td>{originalMoney(row.amount, row.currency)}</td><td className="positive strong">{money(row.usd)}</td><td>{row.note || '—'}</td><td><div className="row-actions"><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل دخل', row.source, row.id)}>تعديل</button><button className="table-action" disabled={mutating} title="فتح نموذج دخل جديد بقيم هذه الحركة" onClick={()=>openAction('نسخ دخل', row.source, row.id)}>نسخ / Duplicate</button></div></td></tr><CashHistoryRow history={row.editHistory} columns={7}/></Fragment>)}</tbody></table></div></section></>
+  const rows = filterIncomeRows(data.incomes, search, type)
+  const analysis = analyzeIncome(rows)
+  return <><PageHead eyebrow="حركة الصندوق الداخلة" title="الدخل" description="دفعة الاشتراك تُخصم تلقائيًا من الرصيد المتبقي للعميل. التعديلات محفوظة تحت كل حركة." action="تسجيل دخل"/><IncomeSummary analysis={analysis}/><section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات الدخل</h2><span>{rows.length} من {data.incomes.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالمصدر أو العميل أو البيان أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/><select value={type} onChange={event=>setType(event.target.value)}><option>الكل</option><option>دفعة اشتراك</option><option>دخل عميل إضافي</option><option>دخل تشغيل إعلانات</option><option>دخل خارجي</option></select>{(search || type !== 'الكل') && <button className="btn ghost" onClick={()=>{setSearch('');setType('الكل')}}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>المصدر</th><th>النوع</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={7} text={data.incomes.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات دخل بعد.'}/> : rows.map(row => <Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.source}<EnteredBy entity="CashEntry" id={row.id}/></td><td>{row.type}</td><td>{originalMoney(row.amount, row.currency)}</td><td className="positive strong">{money(row.usd)}</td><td>{row.note || '—'}</td><td><div className="row-actions"><WriteButton className="table-action" disabled={mutating} onClick={()=>openAction('تعديل دخل', row.source, row.id)}>تعديل</WriteButton><WriteButton className="table-action" disabled={mutating} title="فتح نموذج دخل جديد بقيم هذه الحركة" onClick={()=>openAction('نسخ دخل', row.source, row.id)}>نسخ / Duplicate</WriteButton></div></td></tr><CashHistoryRow history={row.editHistory} columns={7}/></Fragment>)}</tbody></table></div></section><IncomeBreakdown analysis={analysis}/></>
 }
 
 function CashHistoryRow({ history = [], columns }: { history?: CashEntryEditDto[]; columns: number }) {
@@ -592,7 +622,9 @@ function LocalExpenseBars({ rows }: { rows: ExpenseDto[] }) {
 }
 
 function LocalExpenses() {
-  const { data, runCommand, mutating } = useFinance()
+  const { data, rawData, reportPeriod, runCommand, mutating } = useFinance()
+  const canPayPeriod = (kind: 'fixed' | 'service', id: string) => reportPeriod === 'all'
+    || (kind === 'fixed' ? rawData.fixedExpenses : rawData.services).find(row => row.id === id)?.payablePeriod === reportPeriod
   const [tab, setTab] = useState<'overview' | 'linked' | 'fixed' | 'services'>('overview')
   const [search, setSearch] = useState('')
   const query = search.trim().toLocaleLowerCase('ar')
@@ -608,18 +640,18 @@ function LocalExpenses() {
     await runCommand({ type: 'service.archive', requestId: crypto.randomUUID(), payload: { serviceId: row.id } })
   }
   const expenseEdit = (row: ExpenseDto) => row.cashEntryId
-    ? <div className="row-actions"><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل مصروف', row.name, row.id)}>تعديل</button><button className="table-action" disabled={mutating} title="فتح نموذج مصروف جديد بقيم هذه الحركة" onClick={()=>openAction('نسخ مصروف', row.name, row.id)}>نسخ / Duplicate</button></div>
+    ? <div className="row-actions"><WriteButton className="table-action" disabled={mutating} onClick={()=>openAction('تعديل مصروف', row.name, row.id)}>تعديل</WriteButton><WriteButton className="table-action" disabled={mutating} title="فتح نموذج مصروف جديد بقيم هذه الحركة" onClick={()=>openAction('نسخ مصروف', row.name, row.id)}>نسخ / Duplicate</WriteButton></div>
     : <small title="هذه تسوية سلفة غير نقدية؛ تصحيحها من تسوية الراتب في الصندوق.">تسوية راتب غير نقدية</small>
-  const expenseTable = <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات المصروفات</h2><span>{filteredExpenses.length} من {data.expenses.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالبند أو العميل أو التصنيف أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/>{search && <button className="btn ghost" onClick={()=>setSearch('')}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>البند</th><th>التصنيف</th><th>العميل</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th><th>إجراء</th></tr></thead><tbody>{filteredExpenses.length === 0 ? <EmptyTableRow columns={8} text={data.expenses.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات مصروفات بعد.'}/> : filteredExpenses.map(row=><Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.name}</td><td>{row.category}</td><td>{row.client || 'عام'}</td><td>{originalMoney(row.amount,row.currency)}</td><td className="negative strong">-{money(row.usd)}</td><td>{row.note || '—'}</td><td>{expenseEdit(row)}</td></tr><CashHistoryRow history={row.editHistory} columns={8}/></Fragment>)}</tbody></table></div></section>
+  const expenseTable = <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>حركات المصروفات</h2><span>{filteredExpenses.length} من {data.expenses.length} حركة</span></div><div className="table-filters"><input className="search" placeholder="ابحث بالبند أو العميل أو التصنيف أو التاريخ…" value={search} onChange={event=>setSearch(event.target.value)}/>{search && <button className="btn ghost" onClick={()=>setSearch('')}>مسح</button>}</div></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>البند</th><th>التصنيف</th><th>العميل</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>البيان</th><th>إجراء</th></tr></thead><tbody>{filteredExpenses.length === 0 ? <EmptyTableRow columns={8} text={data.expenses.length ? 'لا توجد نتائج مطابقة للبحث.' : 'لا توجد حركات مصروفات بعد.'}/> : filteredExpenses.map(row=><Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.name}<EnteredBy entity="CashEntry" id={row.id}/></td><td>{row.category}</td><td>{row.client || 'عام'}</td><td>{originalMoney(row.amount,row.currency)}</td><td className="negative strong">-{money(row.usd)}</td><td>{row.note || '—'}</td><td>{expenseEdit(row)}</td></tr><CashHistoryRow history={row.editHistory} columns={8}/></Fragment>)}</tbody></table></div></section>
   const linkedTotal = data.expenses.filter(row => row.clientId).reduce((sum, row) => sum + decimal(row.usd), 0)
   const generalTotal = data.expenses.filter(row => !row.clientId).reduce((sum, row) => sum + decimal(row.usd), 0)
   return <>
     <PageHead eyebrow="حركة الصندوق الخارجة" title="المصروفات" description="سجّل المصروف العام أو اربطه بعميل لمعرفة صافي العميل." action="تسجيل مصروف"/>
     <div className="tabs expense-tabs"><button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>الملخص والحركات</button><button className={tab === 'linked' ? 'active' : ''} onClick={() => setTab('linked')}>مرتبطة بعميل</button><button className={tab === 'fixed' ? 'active' : ''} onClick={() => setTab('fixed')}>المصاريف الثابتة</button><button className={tab === 'services' ? 'active' : ''} onClick={() => setTab('services')}>اشتراكات الخدمات</button></div>
     {tab === 'overview' && <><section className="kpi-grid three"><Kpi label="إجمالي المصروفات" value={money(total)} sub={`${data.expenses.length} حركة`} tone="red"/><Kpi label="مرتبطة بعملاء" value={money(linkedTotal)} sub={`${data.expenses.filter(row=>row.clientId).length} حركة`}/><Kpi label="مصروفات عامة" value={money(generalTotal)} sub="على الشركة"/></section>{expenseTable}<section className="panel"><PanelTitle title="التصنيف"/><LocalExpenseBars rows={data.expenses}/></section></>}
-    {tab === 'linked' && <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>مصروفات مرتبطة بالعملاء</h2><span>{linked.length} حركة</span></div><input className="search" placeholder="ابحث بالعميل أو البند…" value={search} onChange={event=>setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>العميل</th><th>التصنيف</th><th>البيان</th><th>المبلغ</th><th>إجراء</th></tr></thead><tbody>{linked.length === 0 ? <EmptyTableRow columns={6}/> : linked.map(row => <Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.client}</td><td>{row.category}</td><td>{row.name}</td><td className="negative strong">-{money(row.usd)}</td><td>{expenseEdit(row)}</td></tr><CashHistoryRow history={row.editHistory} columns={6}/></Fragment>)}</tbody></table></div></section>}
-    {tab === 'fixed' && <section className="panel table-panel"><div className="list-tools"><div><h2>المصاريف الثابتة</h2><span>إضافة وتعديل ودف المصروف عند تسديده</span></div><button className="btn primary" onClick={() => openAction('مصروف ثابت جديد')}>+ إضافة</button></div><div className="table-scroll"><table><thead><tr><th>البند</th><th>التصنيف</th><th>المبلغ</th><th>يوم الاستحقاق</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.fixedExpenses.length === 0 ? <EmptyTableRow columns={6}/> : data.fixedExpenses.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{row.category}</td><td>{money(row.amount)}</td><td>{row.dueDay}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><button className="table-action primary-action" disabled={mutating || row.status === 'مدفوع'} onClick={()=>openAction('دفع مصروف ثابت', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</button><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل مصروف ثابت', row.name, row.id)}>تعديل</button><button className="table-action danger-action" disabled={mutating} onClick={()=>void archiveFixed(row).catch(() => undefined)}>أرشفة</button></div></td></tr>)}</tbody></table></div></section>}
-    {tab === 'services' && <section className="panel table-panel"><div className="list-tools"><div><h2>اشتراكات خدمات الشركة</h2><span>إضافة وتعديل ودفع وأرشفة</span></div><button className="btn primary" onClick={() => openAction('اشتراك خدمة جديد')}>+ إضافة</button></div><div className="table-scroll"><table><thead><tr><th>الخدمة</th><th>التصنيف</th><th>القيمة</th><th>الدورة</th><th>التجديد</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.services.length === 0 ? <EmptyTableRow columns={7}/> : data.services.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{row.category}</td><td>{money(row.amount)}</td><td>{row.cycle}</td><td>{row.next}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><button className="table-action primary-action" disabled={mutating || row.status === 'مدفوع'} onClick={()=>openAction('دفع اشتراك خدمة', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</button><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل اشتراك خدمة', row.name, row.id)}>تعديل</button><button className="table-action danger-action" disabled={mutating} onClick={()=>void archiveService(row).catch(() => undefined)}>أرشفة</button></div></td></tr>)}</tbody></table></div></section>}
+    {tab === 'linked' && <section className="panel table-panel"><div className="list-tools search-tools"><div><h2>مصروفات مرتبطة بالعملاء</h2><span>{linked.length} حركة</span></div><input className="search" placeholder="ابحث بالعميل أو البند…" value={search} onChange={event=>setSearch(event.target.value)}/></div><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>العميل</th><th>التصنيف</th><th>البيان</th><th>المبلغ</th><th>إجراء</th></tr></thead><tbody>{linked.length === 0 ? <EmptyTableRow columns={6}/> : linked.map(row => <Fragment key={row.id}><tr><td>{row.date}</td><td className="strong">{row.client}</td><td>{row.category}</td><td>{row.name}<EnteredBy entity="CashEntry" id={row.id}/></td><td className="negative strong">-{money(row.usd)}</td><td>{expenseEdit(row)}</td></tr><CashHistoryRow history={row.editHistory} columns={6}/></Fragment>)}</tbody></table></div></section>}
+    {tab === 'fixed' && <section className="panel table-panel"><div className="list-tools"><div><h2>المصاريف الثابتة</h2><span>إضافة وتعديل ودف المصروف عند تسديده</span></div><WriteButton className="btn primary" onClick={() => openAction('مصروف ثابت جديد')}>+ إضافة</WriteButton></div><div className="table-scroll"><table><thead><tr><th>البند</th><th>التصنيف</th><th>المبلغ</th><th>يوم الاستحقاق</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.fixedExpenses.length === 0 ? <EmptyTableRow columns={6}/> : data.fixedExpenses.map(row => <tr key={row.id}><td className="strong">{row.name}<EnteredBy entity="RecurringExpenseTemplate" id={row.id}/></td><td>{row.category}</td><td>{money(row.amount)}</td><td>{row.dueDay}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><WriteButton className="table-action primary-action" disabled={mutating || row.archived || row.status === 'مدفوع' || !canPayPeriod('fixed', row.id)} title="الدفع يبدأ بأقدم قسط؛ اختر كل الأشهر إذا وُجد استحقاق أقدم." onClick={()=>openAction('دفع مصروف ثابت', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</WriteButton><WriteButton currentOnly className="table-action" disabled={mutating || row.archived} onClick={()=>openAction('تعديل مصروف ثابت', row.name, row.id)}>تعديل</WriteButton><WriteButton currentOnly className="table-action danger-action" disabled={mutating || row.archived} onClick={()=>void archiveFixed(row).catch(() => undefined)}>أرشفة</WriteButton></div></td></tr>)}</tbody></table></div></section>}
+    {tab === 'services' && <section className="panel table-panel"><div className="list-tools"><div><h2>اشتراكات خدمات الشركة</h2><span>إضافة وتعديل ودفع وأرشفة</span></div><WriteButton className="btn primary" onClick={() => openAction('اشتراك خدمة جديد')}>+ إضافة</WriteButton></div><div className="table-scroll"><table><thead><tr><th>الخدمة</th><th>التصنيف</th><th>القيمة</th><th>الدورة</th><th>التجديد</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.services.length === 0 ? <EmptyTableRow columns={7}/> : data.services.map(row => <tr key={row.id}><td className="strong">{row.name}<EnteredBy entity="ServiceSubscription" id={row.id}/></td><td>{row.category}</td><td>{money(row.amount)}</td><td>{row.cycle}</td><td>{row.next}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><WriteButton className="table-action primary-action" disabled={mutating || row.archived || row.status === 'مدفوع' || !canPayPeriod('service', row.id)} title="الدفع يبدأ بأقدم قسط؛ اختر كل الأشهر إذا وُجد استحقاق أقدم." onClick={()=>openAction('دفع اشتراك خدمة', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</WriteButton><WriteButton currentOnly className="table-action" disabled={mutating || row.archived} onClick={()=>openAction('تعديل اشتراك خدمة', row.name, row.id)}>تعديل</WriteButton><WriteButton currentOnly className="table-action danger-action" disabled={mutating || row.archived} onClick={()=>void archiveService(row).catch(() => undefined)}>أرشفة</WriteButton></div></td></tr>)}</tbody></table></div></section>}
   </>
 }
 
@@ -638,9 +670,9 @@ function LocalLiabilities() {
           const remaining = subtractMoney(row.total, row.paid)
           const payable = hasPositiveMoney(remaining)
           return <Fragment key={row.id}>
-            <tr><td>{row.date}</td><td className="strong">{row.party}</td><td>{row.kind}</td><td>{row.client || 'ذمة عامة'}{row.clientId && <div><small>تكلفة مباشرة</small></div>}</td><td>{row.description || '—'}</td><td>{money(row.total)}</td><td className="positive">{money(row.paid)}</td><td className="negative strong">{money(remaining)}</td><td>{row.due}</td><td><div className="row-actions">
-              <button className="table-action" disabled={mutating || !row.clientLinkEditable} title={row.clientLinkEditable ? 'اختيار عميل أو جعل الذمة عامة، بدون حركة صندوق' : 'لها دفعات سابقة؛ يبقى الربط ثابتًا لحماية سجل الدفع'} onClick={() => openAction('ربط الذمة بعميل', row.party, row.id)}>{row.clientId ? 'تعديل الربط' : 'ربط بعميل'}</button>
-              <button className="table-action primary-action" disabled={mutating || !payable} onClick={() => openAction('دفع ذمة', row.party, row.id)}>{payable ? 'دفع' : 'مسددة'}</button>
+            <tr><td>{row.date}</td><td className="strong">{row.party}<EnteredBy entity="Liability" id={row.id}/></td><td>{row.kind}</td><td>{row.client || 'ذمة عامة'}{row.clientId && <div><small>تكلفة مباشرة</small></div>}</td><td>{row.description || '—'}</td><td>{money(row.total)}</td><td className="positive">{money(row.paid)}</td><td className="negative strong">{money(remaining)}</td><td>{row.due}</td><td><div className="row-actions">
+              <WriteButton className="table-action" disabled={mutating || !row.clientLinkEditable} title={row.clientLinkEditable ? 'اختيار عميل أو جعل الذمة عامة، بدون حركة صندوق' : 'لها دفعات سابقة؛ يبقى الربط ثابتًا لحماية سجل الدفع'} onClick={() => openAction('ربط الذمة بعميل', row.party, row.id)}>{row.clientId ? 'تعديل الربط' : 'ربط بعميل'}</WriteButton>
+              <WriteButton className="table-action primary-action" disabled={mutating || !payable} onClick={() => openAction('دفع ذمة', row.party, row.id)}>{payable ? 'دفع' : 'مسددة'}</WriteButton>
             </div></td></tr>
             <CashHistoryRow history={row.clientLinkHistory} columns={10}/>
           </Fragment>
@@ -652,14 +684,15 @@ function LocalLiabilities() {
 }
 
 function LocalPayroll() {
-  const { data, runCommand, mutating } = useFinance()
+  const { data, rawData, reportPeriod, runCommand, mutating } = useFinance()
   const [search, setSearch] = useState('')
   const rows = data.employees.filter(row => row.name.toLocaleLowerCase('ar').includes(search.toLocaleLowerCase('ar')))
   const net = (row: EmployeeDto) => decimal(row.base) + decimal(row.bonus) - decimal(row.deductions) - decimal(row.loan)
-  const baseTotal = data.employees.reduce((sum, row) => sum + decimal(row.base), 0)
-  const bonusTotal = data.employees.reduce((sum, row) => sum + decimal(row.bonus), 0)
-  const deductionTotal = data.employees.reduce((sum, row) => sum + decimal(row.deductions) + decimal(row.loan), 0)
-  const netTotal = data.employees.reduce((sum, row) => sum + net(row), 0)
+  const payrollTotals = payrollPeriodTotals(rawData, reportPeriod)
+  const baseTotal = decimal(payrollTotals.base)
+  const bonusTotal = decimal(payrollTotals.bonus)
+  const deductionTotal = decimal(payrollTotals.deductions) + decimal(payrollTotals.loan)
+  const netTotal = decimal(payrollTotals.net)
   const archive = async (row: EmployeeDto) => {
     if (!window.confirm(`أرشفة الموظف ${row.name}؟ لن تُحذف حركات الرواتب والمصروفات السابقة.`)) return
     await runCommand({ type: 'employee.archive', requestId: crypto.randomUUID(), payload: { employeeId: row.id } })
@@ -686,25 +719,27 @@ function LocalPayroll() {
 
   return <>
     <PageHead eyebrow="الموظفون والرواتب" title="الموظفون والرواتب" description="الراتب الأساسي + المكافآت − الحسومات − السلف." action="إضافة موظف"/>
-    <div className="summary-strip payroll-summary"><span><b>{data.employees.length}</b> إجمالي الموظفين</span><span><b>{money(baseTotal)}</b> الرواتب الأساسية</span><span><b>{money(bonusTotal)}</b> المكافآت</span><span className="danger-text"><b>{money(deductionTotal)}</b> الحسومات والسلف</span><span><b>{money(netTotal)}</b> صافي الرواتب</span></div>
+    <div className="summary-strip payroll-summary"><span><b>{data.employees.length}</b> موظفون في القائمة</span><span><b>{payrollTotals.periods}</b> فترات رواتب في الإجماليات</span><span><b>{money(baseTotal)}</b> الرواتب الأساسية</span><span><b>{money(bonusTotal)}</b> المكافآت</span><span className="danger-text"><b>{money(deductionTotal)}</b> الحسومات والسلف</span><span><b>{money(netTotal)}</b> صافي الرواتب</span></div>
     <section className="panel table-panel">
-      <div className="list-tools"><div><h2>مسير الرواتب</h2><span>{rows.length} من {data.employees.length} موظفين</span></div><input className="search" placeholder="ابحث باسم الموظف…" value={search} onChange={event=>setSearch(event.target.value)}/></div>
-      <div className="table-scroll"><table><thead><tr><th>الموظف</th><th>الأساسي</th><th>المكافأة</th><th>الحسومات</th><th>السلفة</th><th>الصافي</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={8}/> : rows.map(row => <tr key={row.id}><td className="strong">{row.name}</td><td>{money(row.base)}</td><td className="positive">+{money(row.bonus)}</td><td className="negative">-{money(row.deductions)}</td><td className="negative">-{money(row.loan)}</td><td className="strong">{money(net(row))}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><button className="table-action primary-action" disabled={mutating || row.status === 'مدفوع'} onClick={()=>openAction('دفع راتب', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</button><button className="table-action" disabled={mutating} onClick={()=>openAction('تعديل موظف', row.name, row.id)}>تعديل</button><button className="table-action danger-action" disabled={mutating} onClick={()=>void archive(row).catch(() => undefined)}>أرشفة</button></div></td></tr>)}</tbody></table></div>
+      <div className="list-tools"><div><h2>{reportPeriod === 'all' ? 'الموظفون والراتب الحالي — الإجماليات تشمل كل الفترات' : `مسير رواتب ${reportPeriod}`}</h2><span>{rows.length} من {data.employees.length} موظفين</span></div><input className="search" placeholder="ابحث باسم الموظف…" value={search} onChange={event=>setSearch(event.target.value)}/></div>
+      <div className="table-scroll"><table><thead><tr><th>الموظف</th><th>الأساسي</th><th>المكافأة</th><th>الحسومات</th><th>السلفة</th><th>الصافي</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{rows.length === 0 ? <EmptyTableRow columns={8}/> : rows.map(row => <tr key={row.id}><td className="strong">{row.name}<EnteredBy entity="Employee" id={row.id}/></td><td>{money(row.base)}</td><td className="positive">+{money(row.bonus)}</td><td className="negative">-{money(row.deductions)}</td><td className="negative">-{money(row.loan)}</td><td className="strong">{money(net(row))}</td><td><Status tone={row.status === 'مدفوع' ? 'good' : 'warn'}>{row.status}</Status></td><td><div className="row-actions"><WriteButton className="table-action primary-action" disabled={mutating || row.archived || row.status === 'مدفوع'} onClick={()=>openAction('دفع راتب', row.name, row.id)}>{row.status === 'مدفوع' ? 'تم الدفع' : 'دفع'}</WriteButton><WriteButton currentOnly className="table-action" disabled={mutating || row.archived} onClick={()=>openAction('تعديل موظف', row.name, row.id)}>تعديل</WriteButton><WriteButton currentOnly className="table-action danger-action" disabled={mutating || row.archived} onClick={()=>void archive(row).catch(() => undefined)}>أرشفة</WriteButton></div></td></tr>)}</tbody></table></div>
     </section>
     <section className="panel table-panel">
       <PanelTitle title="سجل تسويات الرواتب" meta="يشمل التسويات النقدية وحسومات السلف غير النقدية"/>
-      <div className="table-scroll"><table><thead><tr><th>الفترة</th><th>الموظف</th><th>الصافي</th><th>المدفوع نقدًا</th><th>حسم السلفة</th><th>تاريخ الدفع</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.payrollSettlements.length === 0 ? <EmptyTableRow columns={8} text="لا توجد تسويات رواتب بعد."/> : data.payrollSettlements.map(row => <tr key={row.payrollItemId}><td>{row.period}</td><td className="strong">{row.employeeName}</td><td>{money(row.netPay)}</td><td>{money(row.cashPaid)}</td><td>{money(row.advanceApplied)}</td><td>{row.paidOn || '—'}</td><td><Status tone={row.status === 'PAID' ? 'good' : row.status === 'VOID' ? 'neutral' : 'warn'}>{payrollStatus(row.status)}</Status></td><td>{row.reversible ? <button className="table-action danger-action" disabled={mutating} onClick={()=>void reversePayroll(row).catch(() => undefined)}>عكس التسوية</button> : '—'}</td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>الفترة</th><th>الموظف</th><th>الصافي</th><th>المدفوع نقدًا</th><th>حسم السلفة</th><th>تاريخ الدفع</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.payrollSettlements.length === 0 ? <EmptyTableRow columns={8} text="لا توجد تسويات رواتب بعد."/> : data.payrollSettlements.map(row => <tr key={row.payrollItemId}><td>{row.period}</td><td className="strong">{row.employeeName}<EnteredBy entity="PayrollSettlement" id={row.payrollItemId}/></td><td>{money(row.netPay)}</td><td>{money(row.cashPaid)}</td><td>{money(row.advanceApplied)}</td><td>{row.paidOn || '—'}</td><td><Status tone={row.status === 'PAID' ? 'good' : row.status === 'VOID' ? 'neutral' : 'warn'}>{payrollStatus(row.status)}</Status></td><td>{row.reversible ? <WriteButton className="table-action danger-action" disabled={mutating} onClick={()=>void reversePayroll(row).catch(() => undefined)}>عكس التسوية</WriteButton> : '—'}</td></tr>)}</tbody></table></div>
     </section>
   </>
 }
 
 function LocalAdvances() {
   const { data } = useFinance()
-  return <><PageHead eyebrow="السلف والسحوبات" title="السلف والسحوبات" description="سلف الموظفين وسحوبات المالك تبقى أرصدة مستقلة." action="تسجيل سلفة"/><section className="panel table-panel"><PanelTitle title="سجل السلف" meta={`${data.advances.length} قيود`}/><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>الاسم</th><th>النوع</th><th>المبلغ</th><th>المسدّد</th><th>المتبقي</th><th>إجراء</th></tr></thead><tbody>{data.advances.length === 0 ? <EmptyTableRow columns={7}/> : data.advances.map(row => { const remaining = subtractMoney(row.amount, row.paid); const repayable = hasPositiveMoney(remaining); return <tr key={row.id}><td>{row.date}</td><td className="strong">{row.name}</td><td>{row.kind}</td><td>{money(row.amount)}</td><td>{money(row.paid)}</td><td className="negative strong">{money(remaining)}</td><td><button className="table-action primary-action" disabled={!repayable} onClick={() => openAction('تسديد سلفة', row.name, row.id)}>{repayable ? 'تسديد' : 'مسددة'}</button></td></tr> })}</tbody></table></div></section></>
+  return <><PageHead eyebrow="السلف والسحوبات" title="السلف والسحوبات" description="سلف الموظفين وسحوبات المالك تبقى أرصدة مستقلة." action="تسجيل سلفة"/><section className="panel table-panel"><PanelTitle title="سجل السلف" meta={`${data.advances.length} قيود`}/><div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>الاسم</th><th>النوع</th><th>المبلغ</th><th>المسدّد</th><th>المتبقي</th><th>إجراء</th></tr></thead><tbody>{data.advances.length === 0 ? <EmptyTableRow columns={7}/> : data.advances.map(row => { const remaining = subtractMoney(row.amount, row.paid); const repayable = hasPositiveMoney(remaining); return <tr key={row.id}><td>{row.date}</td><td className="strong">{row.name}<EnteredBy entity="Advance" id={row.id}/></td><td>{row.kind}</td><td>{money(row.amount)}</td><td>{money(row.paid)}</td><td className="negative strong">{money(remaining)}</td><td><WriteButton className="table-action primary-action" disabled={!repayable} onClick={() => openAction('تسديد سلفة', row.name, row.id)}>{repayable ? 'تسديد' : 'مسددة'}</WriteButton></td></tr> })}</tbody></table></div></section></>
 }
 
 function LocalCashbox() {
-  const { data, runCommand, mutating } = useFinance()
+  const { data, rawData, reportPeriod, runCommand, mutating } = useFinance()
+  const balances = reportPeriod === 'all' ? undefined : cashPeriodBalances(rawData, reportPeriod)
+  const cashbox = balances?.closing ?? data.cashbox
   const reverseEntry = async (row: CashLedgerEntryDto) => {
     if (!row.reversalCommand || !row.reversalTargetId) return
     const reason = requestReversalReason(`القيد «${row.description}»`)
@@ -731,23 +766,24 @@ function LocalCashbox() {
 
   return <>
     <PageHead eyebrow="صندوق واحد — عملتان" title="الصندوق" description="الأرصدة محسوبة من كافة حركات دفتر الأستاذ في قاعدة البيانات، مع حفظ القيود المعكوسة للتدقيق."/>
-    <section className="cash-cards"><article><span>رصيد الدولار</span><strong>{money(data.cashbox.usd)}</strong><small>صافي كافة حركات USD</small></article><article><span>رصيد الليرة السورية</span><strong>{new Intl.NumberFormat('en-US').format(decimal(data.cashbox.syp))} ل.س</strong><small>صافي كافة حركات SYP</small></article><article className="total"><span>القيمة الإجمالية التقريبية</span><strong>{money(data.cashbox.totalUsd)}</strong><small>حسب سعر الصرف الحالي</small></article></section>
+    {balances && <section className="panel"><PanelTitle title="رصيد البداية وحركة الشهر"/><div className="summary-strip"><span>بداية الشهر: <b>{money(balances.opening.usd)}</b> / <b>{balances.opening.syp} ل.س</b></span><span>صافي حركة الشهر: <b>{money(balances.movement.usd)}</b> / <b>{balances.movement.syp} ل.س</b></span></div></section>}<section className="cash-cards"><article><span>{balances ? `رصيد الدولار حتى نهاية ${reportPeriod}` : 'رصيد الدولار'}</span><strong>{money(cashbox.usd)}</strong><small>{balances ? 'يشمل رصيد البداية' : 'صافي كافة حركات USD'}</small></article><article><span>{balances ? `رصيد الليرة حتى نهاية ${reportPeriod}` : 'رصيد الليرة السورية'}</span><strong>{new Intl.NumberFormat('en-US').format(decimal(cashbox.syp))} ل.س</strong><small>{balances ? 'يشمل رصيد البداية' : 'صافي كافة حركات SYP'}</small></article><article className="total"><span>القيمة الإجمالية التقريبية</span><strong>{money(cashbox.totalUsd)}</strong><small>حسب سعر الصرف الحالي</small></article></section>
     <section className="panel table-panel">
       <PanelTitle title="دفتر حركات الصندوق" meta="العكس ينشئ قيدًا معاكسًا ولا يحذف السجل الأصلي"/>
-      <div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>البيان</th><th>النوع</th><th>الاتجاه</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.cashLedger.length === 0 ? <EmptyTableRow columns={8} text="لا توجد حركات صندوق بعد."/> : data.cashLedger.map(row => <tr key={row.id}><td>{row.date}</td><td className="strong">{row.description}</td><td>{row.kind}</td><td><Status tone={row.direction === 'INFLOW' ? 'good' : 'bad'}>{row.direction === 'INFLOW' ? 'داخل' : 'خارج'}</Status></td><td>{originalMoney(row.amount, row.currency)}</td><td className={row.direction === 'INFLOW' ? 'positive strong' : 'negative strong'}>{row.direction === 'INFLOW' ? '' : '-'}{money(row.usd)}</td><td><Status tone={row.status === 'REVERSED' ? 'neutral' : row.reversalOfId ? 'warn' : 'good'}>{ledgerStatus(row)}</Status></td><td>{row.reversible ? <button className="table-action danger-action" disabled={mutating} onClick={()=>void reverseEntry(row).catch(() => undefined)}>عكس القيد</button> : '—'}</td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table><thead><tr><th>التاريخ</th><th>البيان</th><th>النوع</th><th>الاتجاه</th><th>المبلغ الأصلي</th><th>بالدولار</th><th>الحالة</th><th>إجراء</th></tr></thead><tbody>{data.cashLedger.length === 0 ? <EmptyTableRow columns={8} text="لا توجد حركات صندوق بعد."/> : data.cashLedger.map(row => <tr key={row.id}><td>{row.date}</td><td className="strong">{row.description}<EnteredBy entity="CashEntry" id={row.id}/></td><td>{row.kind}</td><td><Status tone={row.direction === 'INFLOW' ? 'good' : 'bad'}>{row.direction === 'INFLOW' ? 'داخل' : 'خارج'}</Status></td><td>{originalMoney(row.amount, row.currency)}</td><td className={row.direction === 'INFLOW' ? 'positive strong' : 'negative strong'}>{row.direction === 'INFLOW' ? '' : '-'}{money(row.usd)}</td><td><Status tone={row.status === 'REVERSED' ? 'neutral' : row.reversalOfId ? 'warn' : 'good'}>{ledgerStatus(row)}</Status></td><td>{row.reversible ? <WriteButton className="table-action danger-action" disabled={mutating} onClick={()=>void reverseEntry(row).catch(() => undefined)}>عكس القيد</WriteButton> : '—'}</td></tr>)}</tbody></table></div>
     </section>
   </>
 }
 
 function LocalReports() {
-  const { data } = useFinance()
+  const { data, rawData, reportPeriod } = useFinance()
   const totals = localTotals(data)
-  const monthlyContracts = data.clients.reduce((sum,row)=>sum + decimal(row.monthly),0)
-  return <><PageHead eyebrow="تقارير الإدارة" title="التقارير والتحليل" description="تُحسب هذه الأرقام مباشرة من بيانات قاعدة البيانات."/><section className="kpi-grid five"><Kpi label="إجمالي الدخل" value={money(totals.income)} sub={`${data.incomes.length} حركة`} tone="green"/><Kpi label="إجمالي المصروف" value={money(totals.expense)} sub={`${data.expenses.length} حركة`} tone="red"/><Kpi label="صافي الربح" value={money(totals.profit)} sub="الدخل ناقص المصروف" tone="orange"/><Kpi label="ذمم العملاء" value={money(totals.receivables)} sub="متبقي الاشتراكات"/><Kpi label="العقود الشهرية" value={money(monthlyContracts)} sub={`${data.clients.filter(row=>decimal(row.monthly)>0).length} اشتراك`}/></section><div className="split-grid"><section className="panel"><PanelTitle title="تصنيف المصروفات"/><LocalExpenseBars rows={data.expenses}/></section><LocalReceivables/></div></>
+  const contractRows = subscriptionPeriodRows(rawData, reportPeriod)
+  const monthlyContracts = contractRows.reduce((sum,row)=>sum + decimal(row.monthly),0)
+  return <><PageHead eyebrow="تقارير الإدارة" title="التقارير والتحليل" description="تُحسب هذه الأرقام مباشرة من بيانات قاعدة البيانات."/><section className="kpi-grid five"><Kpi label="إجمالي الدخل" value={money(totals.income)} sub={`${data.incomes.length} حركة`} tone="green"/><Kpi label="إجمالي المصروف" value={money(totals.expense)} sub={`${data.expenses.length} حركة`} tone="red"/><Kpi label="صافي الربح" value={money(totals.profit)} sub="الدخل ناقص المصروف" tone="orange"/><Kpi label="ذمم العملاء" value={money(totals.receivables)} sub="رصيد متراكم حالي لكل الأشهر"/><Kpi label="العقود الشهرية" value={money(monthlyContracts)} sub={`${contractRows.filter(row=>decimal(row.monthly)>0).length} اشتراك`}/></section><div className="split-grid"><section className="panel"><PanelTitle title="تصنيف المصروفات"/><LocalExpenseBars rows={data.expenses}/></section><LocalReceivables/></div></>
 }
 
 function LocalSettings() {
-  const { data, runCommand, mutating } = useFinance()
+  const { data, runCommand, mutating, canEdit } = useFinance()
   const requestIdRef = useRef(crypto.randomUUID())
   const [rate, setRate] = useState(String(data.exchangeRate))
   const [saved, setSaved] = useState(false)
@@ -763,15 +799,17 @@ function LocalSettings() {
       setSaveError(error instanceof Error ? error.message : 'تعذّر حفظ سعر الصرف.')
     }
   }
-  return <><PageHead eyebrow="إعدادات النظام" title="الإعدادات" description="سعر الصرف وتصدير لقطة من قاعدة البيانات."/><div className="settings-grid"><section className="panel settings-card"><PanelTitle title="سعر الصرف"/><label className="big-input"><span>1 دولار =</span><input inputMode="decimal" value={rate} onChange={event => { setRate(event.target.value.replace(/[^\d.]/g,'')); requestIdRef.current = crypto.randomUUID(); setSaved(false); setSaveError('') }}/><b>ل.س</b></label>{saveError && <div className="notice error-notice">{saveError}</div>}<button className="btn primary" disabled={mutating} onClick={() => void saveRate()}>{mutating ? 'جاري الحفظ…' : saved ? 'تم الحفظ ✓' : 'حفظ سعر الصرف'}</button></section><section className="panel settings-card"><PanelTitle title="تصدير البيانات"/><p>نزّل لقطة JSON للمراجعة أو الأرشفة. مسح بيانات المتصفح لن يؤثر في السجلات المحفوظة.</p><button className="btn primary" onClick={backup}>تنزيل لقطة JSON</button></section><section className="panel settings-card"><PanelTitle title="عن الحفظ"/><ul className="rules"><li>البيانات محفوظة في قاعدة PostgreSQL المركزية.</li><li>كل دفع يُسجّل كحركة مالية مستقلة قابلة للمراجعة.</li><li>تغيير سعر الصرف يؤثر في القيود الجديدة فقط.</li></ul></section></div></>
+  return <><PageHead eyebrow="إعدادات النظام" title="الإعدادات" description="سعر الصرف وتصدير لقطة من قاعدة البيانات."/><div className="settings-grid"><section className="panel settings-card"><PanelTitle title="سعر الصرف"/><label className="big-input"><span>1 دولار =</span><input disabled={!canEdit} inputMode="decimal" value={rate} onChange={event => { setRate(event.target.value.replace(/[^\d.]/g,'')); requestIdRef.current = crypto.randomUUID(); setSaved(false); setSaveError('') }}/><b>ل.س</b></label>{saveError && <div className="notice error-notice">{saveError}</div>}<WriteButton className="btn primary" disabled={mutating} onClick={() => void saveRate()}>{mutating ? 'جاري الحفظ…' : saved ? 'تم الحفظ ✓' : 'حفظ سعر الصرف'}</WriteButton></section><section className="panel settings-card"><PanelTitle title="تصدير البيانات"/><p>نزّل لقطة JSON للمراجعة أو الأرشفة. مسح بيانات المتصفح لن يؤثر في السجلات المحفوظة.</p><button className="btn primary" onClick={backup}>تنزيل لقطة JSON</button></section><section className="panel settings-card"><PanelTitle title="عن الحفظ"/><ul className="rules"><li>البيانات محفوظة في قاعدة PostgreSQL المركزية.</li><li>كل دفع يُسجّل كحركة مالية مستقلة قابلة للمراجعة.</li><li>تغيير سعر الصرف يؤثر في القيود الجديدة فقط.</li></ul></section></div></>
 }
 
 function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClose: () => void }) {
-  const { data, runCommand, mutating } = useFinance()
+  const { rawData: data, reportPeriod, runCommand, mutating } = useFinance()
   const requestIdRef = useRef(crypto.randomUUID())
   const clientRecord = data.clients.find(row => row.id === request.subjectId)
   const subscriptionClient = data.clients.find(row => row.subscriptionId === request.subjectId)
-  const employeeRecord = data.employees.find(row => row.id === request.subjectId)
+  const employeeRecord = request.action === 'دفع راتب'
+    ? payrollEmployee(data, request.subjectId ?? '', reportPeriod)
+    : data.employees.find(row => row.id === request.subjectId)
   const liabilityRecord = data.liabilities.find(row => row.id === request.subjectId)
   const advanceRecord = data.advances.find(row => row.id === request.subjectId)
   const fixedRecord = data.fixedExpenses.find(row => row.id === request.subjectId)
@@ -824,6 +862,11 @@ function LocalActionDialog({ request, onClose }: { request: ActionRequest; onClo
 
     try {
       if (missingDuplicate) throw new Error('الحركة الأصلية غير متاحة للنسخ. أغلق النافذة وحدّث الصفحة.')
+      if (reportPeriod !== 'all' && ((request.action === 'دفع مصروف ثابت' && fixedRecord?.payablePeriod !== reportPeriod)
+        || (request.action === 'دفع اشتراك خدمة' && serviceRecord?.payablePeriod !== reportPeriod))) {
+        throw new Error('الدفع يبدأ بأقدم قسط مستحق. اختر كل الأشهر لتسديد الاستحقاق الأقدم أولًا.')
+      }
+      if (request.action === 'دفع راتب' && employeeRecord?.archived) throw new Error('هذا الموظف مؤرشف؛ العرض التاريخي لا يتيح تسديده.')
       switch (request.action) {
         case 'عميل جديد':
           command = { type: 'client.create', requestId, payload: { name: value('name'), phone: optional('phone') } }
@@ -1046,6 +1089,8 @@ function UserGuide({ step, onStep, onClose }: { step: number; onStep: (step: num
 export default function Home() {
   const [view, setView] = useState<View>('dashboard')
   const [data, setData] = useState<FinanceSnapshot | null>(null)
+  const [reportPeriod, setReportPeriod] = useState<ReportPeriod>('all')
+  const [user, setUser] = useState<Principal | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [mutating, setMutating] = useState(false)
@@ -1054,18 +1099,36 @@ export default function Home() {
   const [guideOpen, setGuideOpen] = useState(false)
   const [guideStep, setGuideStep] = useState(0)
   const [actionRequest, setActionRequest] = useState<ActionRequest | null>(null)
+  const periodEnabled = view !== 'users' && view !== 'settings'
+  const visibleData = useMemo(() => data && periodEnabled ? selectFinancePeriod(data, reportPeriod) : data, [data, reportPeriod, periodEnabled])
+  const businessMonth = data?.businessMonth ?? businessDate().slice(0, 7)
+  const periodNotes: Partial<Record<View, string>> = {
+    subscriptions: 'فواتير الشهر وحالة تحصيلها الحالية، مع عرض رصيد العميل المتراكم منفصلًا. عرض الأشهر السابقة لا يغيّر العقد الحالي.',
+    clients: 'دليل العملاء والعقود والأرصدة حالية؛ صافي العملاء من حركات الفترة والذمم المسجّلة خلالها.',
+    advances: 'السلف حسب شهر منحها. المسدّد والمتبقي يعرضان وضع السلفة الحالي، لا رصيدًا تاريخيًا مغلقًا.',
+    liabilities: 'الذمم حسب شهر تسجيلها. المدفوع والمتبقي هما الحالة الحالية للذمم المعروضة.',
+    payroll: 'التصفية حسب شهر استحقاق الراتب، لا تاريخ دفعه. إجماليات الرواتب للفترات المعروضة، وحالة السداد الحالية.',
+    expenses: 'الحركات حسب تاريخها؛ الثوابت والخدمات حسب شهر استحقاق القسط وحالة سداده الحالية. الدفع يبدأ بأقدم قسط مستحق.',
+    cashbox: 'دفتر الصندوق حسب تاريخ القيد، مع رصيد البداية والحركة والنهاية. التحويل التقريبي بسعر الصرف الحالي.',
+  }
+  const periodNote = reportPeriod === 'all' ? 'جميع الحركات والفترات المتاحة. أرصدة العملاء والمسدّد والمتبقي محدّثة حتى الآن.'
+    : periodNotes[view] ?? 'الدخل والمصروف والربح لحركات الشهر المحدد؛ المتبقي على العملاء رصيد حالي متراكم لكل الأشهر.'
 
   const refresh = useCallback(async () => {
     setLoading(true)
     setLoadError('')
     try {
-      const response = await fetch('/api/finance', {
+      const [response, identity] = await Promise.all([fetch('/api/finance', {
         cache: 'no-store',
         credentials: 'same-origin',
         headers: { Accept: 'application/json' },
-      })
+      }), fetch('/api/auth/me', { cache: 'no-store', credentials: 'same-origin' })])
+      const session = await identity.json()
+      if (!identity.ok || !session.user || !['OWNER', 'EDITOR', 'VIEWER'].includes(session.user.role)) throw new Error(session.error?.message || 'تعذّر التحقق من صلاحيات الحساب.')
+      setUser(session.user)
       setData(await readFinanceResponse(response))
     } catch (error) {
+      setUser(null)
       setLoadError(requestErrorMessage(error, 'تعذّر تحميل البيانات المالية.'))
       throw error
     } finally {
@@ -1074,6 +1137,7 @@ export default function Home() {
   }, [])
 
   const runCommand = useCallback(async (command: FinanceCommandInput) => {
+    if (!user || !canEditFinance(user)) throw new Error('حسابك للمشاهدة فقط؛ لا يمكنك حفظ تغييرات.')
     setMutating(true)
     setMutationError('')
     try {
@@ -1095,7 +1159,7 @@ export default function Home() {
     } finally {
       setMutating(false)
     }
-  }, [])
+  }, [user])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -1109,10 +1173,10 @@ export default function Home() {
     return () => window.clearTimeout(timer)
   }, [])
   useEffect(() => {
-    const open = (event: Event) => setActionRequest((event as CustomEvent<ActionRequest>).detail)
+    const open = (event: Event) => { if (user && canEditFinance(user)) setActionRequest((event as CustomEvent<ActionRequest>).detail) }
     window.addEventListener('ozmo-open-action', open)
     return () => window.removeEventListener('ozmo-open-action', open)
-  }, [])
+  }, [user])
   const closeGuide = () => {
     window.localStorage.setItem('ozmo-finance-guide-seen', 'yes')
     setGuideOpen(false)
@@ -1124,24 +1188,24 @@ export default function Home() {
     setMobileOpen(false)
   }
 
-  if (!data) {
+  if (!data || !visibleData || !user) {
     return <main className="app-shell"><section className="workspace" style={{ marginRight: 0, maxWidth: 760, marginInline: 'auto', paddingTop: 100 }}><section className="panel settings-card"><span className="eyebrow">OZMO Finance</span><h1>{loading ? 'جاري تحميل البيانات…' : 'تعذّر الاتصال بقاعدة البيانات'}</h1><p>{loading ? 'يتم الآن قراءة أحدث الأرصدة والسجلات من PostgreSQL.' : loadError}</p>{!loading && <button className="btn primary" onClick={() => void refresh().catch(() => undefined)}>إعادة المحاولة</button>}</section></section></main>
   }
 
   const content: Record<View, React.ReactNode> = {
-    dashboard: <LocalDashboard changeView={setView}/>, subscriptions: <LocalSubscriptions/>, clients: <LocalClients/>, income: <LocalIncome/>, expenses: <LocalExpenses/>, liabilities: <LocalLiabilities/>, payroll: <LocalPayroll/>, advances: <LocalAdvances/>, cashbox: <LocalCashbox/>, reports: <LocalReports/>, settings: <LocalSettings/>,
+    dashboard: <LocalDashboard changeView={setView}/>, subscriptions: <LocalSubscriptions/>, clients: <LocalClients/>, income: <LocalIncome/>, expenses: <LocalExpenses/>, liabilities: <LocalLiabilities/>, payroll: <LocalPayroll/>, advances: <LocalAdvances/>, cashbox: <LocalCashbox/>, reports: <LocalReports/>, settings: <LocalSettings/>, users: canManageUsers(user) ? <UsersPanel currentUser={user} onChanged={refresh}/> : <p>هذا القسم يحتاج إلى صلاحية تعديل.</p>,
   }
-  return <FinanceContext.Provider value={{ data, mutating, mutationError, refresh, runCommand }}><main className="app-shell">
+  return <FinanceContext.Provider value={{ data: visibleData, rawData: data, reportPeriod, setReportPeriod, periodEnabled, periodNote, businessMonth, historical: reportPeriod !== 'all' && reportPeriod !== businessMonth, mutating, canEdit: canEditFinance(user), mutationError, refresh, runCommand }}><main className="app-shell">
     <button className="mobile-menu" onClick={() => setMobileOpen(!mobileOpen)} aria-label="فتح القائمة">☰</button>
     {mobileOpen && <button className="backdrop" onClick={() => setMobileOpen(false)} aria-label="إغلاق القائمة"/>}
     <aside className={mobileOpen ? 'sidebar open' : 'sidebar'}>
       <div className="brand"><span className="logo-frame"><Image src="/logo-ozmo.png" alt="OZMO" width={192} height={108} priority/></span><div><b>OZMO</b><span>FINANCE CONTROL</span></div></div>
-      <nav>{navigation.map(item => { const overdue = data.clients.filter(client => client.status === 'متأخر').length; return <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setMobileOpen(false) }}><Icon name={item.icon}/><span>{item.label}</span>{item.id === 'subscriptions' && overdue > 0 && <em>{overdue}</em>}</button> })}</nav>
+      <nav>{navigation.filter(item => item.id !== 'users' || canManageUsers(user)).map(item => { const overdue = data.clients.filter(client => client.status === 'متأخر').length; return <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setMobileOpen(false) }}><Icon name={item.icon}/><span>{item.label}</span>{item.id === 'subscriptions' && overdue > 0 && <em>{overdue}</em>}</button> })}</nav>
       <button className="guide-launcher" onClick={openGuide}><span>؟</span><div><b>دليل الاستخدام</b><small>شرح سريع للنظام</small></div></button>
-      <div className="owner"><span>GK</span><div><b>المالك</b><small>صلاحية كاملة</small></div><i>•••</i></div>
+      <div className="owner"><span>{user.name.slice(0, 2)}</span><div><b>{user.name}</b><small>{roleLabel(user.role)}</small></div><i>•••</i></div>
     </aside>
-    <section className="workspace">{mutationError && <div className="notice error-notice" role="alert">{mutationError}</div>}{loadError && <div className="notice error-notice" role="alert">{loadError}</div>}{content[view]}<footer><span>OZMO Finance V2</span><span>البيانات محفوظة مركزيًا في PostgreSQL</span></footer></section>
+    <section className="workspace">{!canEditFinance(user) && <div className="notice">حسابك للمشاهدة فقط — يمكنك البحث وعرض التقارير والتصدير، دون إضافة أو تعديل أو دفع أو عكس أي حركة.</div>}{mutationError && <div className="notice error-notice" role="alert">{mutationError}</div>}{loadError && <div className="notice error-notice" role="alert">{loadError}</div>}{content[view]}<footer><span>OZMO Finance V2</span><span>البيانات محفوظة مركزيًا في PostgreSQL</span></footer></section>
     {guideOpen && <UserGuide step={guideStep} onStep={setGuideStep} onClose={closeGuide}/>} 
-    {actionRequest && <LocalActionDialog key={actionRequest.dialogKey ?? `${actionRequest.action}:${actionRequest.subjectId ?? ''}`} request={actionRequest} onClose={() => setActionRequest(null)}/>}
+    {actionRequest && canEditFinance(user) && <LocalActionDialog key={actionRequest.dialogKey ?? `${actionRequest.action}:${actionRequest.subjectId ?? ''}`} request={actionRequest} onClose={() => setActionRequest(null)}/>}
   </main></FinanceContext.Provider>
 }

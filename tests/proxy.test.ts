@@ -7,31 +7,42 @@ afterEach(() => {
 })
 
 describe('production proxy authentication', () => {
-  it('keeps the health endpoint public', () => {
+  it('keeps the static shell separate from the real API authorization boundary', async () => {
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('ADMIN_USERNAME', 'owner')
+    vi.stubEnv('ADMIN_PASSWORD', '7f9e1d3c5b8a2e6f4d0c9b1a8e7f6d5c')
+    const shell = await proxy(new NextRequest('https://finance.example.com/', { headers: { authorization: authorization('staff', 'Any-header-only') } }))
+    expect(shell.status).toBe(200)
+    expect(shell.headers.get('x-user-role')).toBeNull()
+    expect(await shell.text()).toBe('')
+    const ownerWrong = await proxy(new NextRequest('https://finance.example.com/', { headers: { authorization: authorization('owner', 'wrong') } }))
+    expect(ownerWrong.status).toBe(401)
+  })
+  it('keeps the health endpoint public', async () => {
     vi.stubEnv('NODE_ENV', 'production')
 
-    const response = proxy(new NextRequest('https://finance.example.com/api/health'))
+    const response = await proxy(new NextRequest('https://finance.example.com/api/health'))
 
     expect(response.status).toBe(200)
   })
 
-  it('fails closed when credentials are missing or unsafe', () => {
+  it('fails closed when credentials are missing or unsafe', async () => {
     vi.stubEnv('NODE_ENV', 'production')
     vi.stubEnv('ADMIN_USERNAME', 'admin')
     vi.stubEnv('ADMIN_PASSWORD', 'replace_with_a_strong_static_password')
 
-    const response = proxy(new NextRequest('https://finance.example.com/'))
+    const response = await proxy(new NextRequest('https://finance.example.com/'))
 
     expect(response.status).toBe(503)
   })
 
-  it('challenges invalid credentials and accepts valid credentials', () => {
+  it('challenges invalid credentials and accepts valid credentials', async () => {
     vi.stubEnv('NODE_ENV', 'production')
     vi.stubEnv('ADMIN_USERNAME', 'owner')
     vi.stubEnv('ADMIN_PASSWORD', '7f9e1d3c5b8a2e6f4d0c9b1a8e7f6d5c')
 
-    const rejected = proxy(new NextRequest('https://finance.example.com/'))
-    const accepted = proxy(new NextRequest('https://finance.example.com/', {
+    const rejected = await proxy(new NextRequest('https://finance.example.com/'))
+    const accepted = await proxy(new NextRequest('https://finance.example.com/', {
       headers: { authorization: authorization('owner', '7f9e1d3c5b8a2e6f4d0c9b1a8e7f6d5c') },
     }))
 

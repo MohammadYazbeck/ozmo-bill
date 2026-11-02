@@ -19,10 +19,10 @@ afterEach(() => {
 describe('API request security', () => {
   it('allows missing credentials in development but fails closed in production', async () => {
     vi.stubEnv('NODE_ENV', 'development')
-    expect(requireApiAuth(request())).toBeNull()
+    expect(await requireApiAuth(request())).toBeNull()
 
     vi.stubEnv('NODE_ENV', 'production')
-    const response = requireApiAuth(request())
+    const response = await requireApiAuth(request())
 
     expect(response?.status).toBe(503)
     await expect(response?.json()).resolves.toEqual({
@@ -33,18 +33,18 @@ describe('API request security', () => {
     })
   })
 
-  it('challenges invalid production credentials and accepts valid credentials', () => {
+  it('challenges invalid production credentials and accepts valid credentials', async () => {
     configureProduction()
 
-    const rejected = requireApiAuth(request())
-    const accepted = requireApiAuth(request({ authorization: authorization() }))
+    const rejected = await requireApiAuth(request())
+    const accepted = await requireApiAuth(request({ authorization: authorization() }))
 
     expect(rejected?.status).toBe(401)
     expect(rejected?.headers.get('www-authenticate')).toContain('Basic')
     expect(accepted).toBeNull()
   })
 
-  it('requires the configured HTTPS origin for production mutations', () => {
+  it('requires the configured HTTPS origin for production mutations', async () => {
     configureProduction()
 
     expect(requireSameOrigin(request({ origin: 'https://bill.ozmo.media' }))).toBeNull()
@@ -53,7 +53,7 @@ describe('API request security', () => {
     expect(requireSameOrigin(request({}, 'GET'))).toBeNull()
   })
 
-  it('fails closed when APP_DOMAIN is missing for a production mutation', () => {
+  it('fails closed when APP_DOMAIN is missing for a production mutation', async () => {
     configureProduction()
     vi.stubEnv('APP_DOMAIN', '')
 

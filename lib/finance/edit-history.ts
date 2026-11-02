@@ -45,7 +45,7 @@ export function buildCashEditHistories(audits: EditAudit[]) {
       if (!event) break
       const metadata = record(event.metadata)
       history.push({
-        id: event.id, actor: event.actor || 'غير محدد',
+        id: event.id, actor: typeof metadata.actorName === 'string' && metadata.actorName ? metadata.actorName : event.actor || 'غير محدد',
         occurredAt: event.occurredAt.toISOString(),
         reason: typeof metadata.reason === 'string' ? metadata.reason : '',
         changes: cashEditChanges(event.before, event.after),
@@ -64,7 +64,7 @@ export function buildLiabilityClientHistories(audits: EditAudit[]) {
     const metadata = record(event.metadata)
     const history = histories.get(event.entityId) ?? []
     history.push({
-      id: event.id, actor: event.actor || 'غير محدد', occurredAt: event.occurredAt.toISOString(),
+      id: event.id, actor: typeof metadata.actorName === 'string' && metadata.actorName ? metadata.actorName : event.actor || 'غير محدد', occurredAt: event.occurredAt.toISOString(),
       reason: typeof metadata.reason === 'string' ? metadata.reason : '',
       changes: cashEditChanges(event.before, event.after),
     })
